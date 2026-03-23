@@ -79,7 +79,7 @@ async def run_dns_task(dns_app_instance: DNSApplication, file_key: str) -> None:
 # Celery task
 # ============================================================
 
-@app.task(name="task.process_file", acks_late=True, soft_time_limit=60000, time_limit=72000)
+@app.task(name="task.process_file", acks_late=True, soft_time_limit=3600, time_limit=4200)
 def process_file(file: str) -> dict[str, Any]:
     """
     Expected file examples:
