@@ -67,22 +67,3 @@ app.conf.task_default_queue = "standard_queue"
 app.conf.task_default_exchange = "standard_exchange"
 app.conf.task_default_exchange_type = "direct"
 app.conf.task_default_routing_key = "standard_queue"
-
-# ============================================================
-# Imports
-# ============================================================
-
-try:
-    import dns_cache_tasks  # noqa: F401
-except Exception:
-    pass
-
-try:
-    import ip_cache_tasks  # noqa: F401
-except Exception:
-    pass
-
-try:
-    import task  # noqa: F401
-except Exception:
-    pass
