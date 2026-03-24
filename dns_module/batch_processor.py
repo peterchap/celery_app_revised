@@ -835,32 +835,6 @@ class BatchProcessor:
             retry_limit=retry_limit
         )
 
-        if not self.lmdb_path:
-            raise RuntimeError("LMDB path not configured on BatchProcessor")
-
-        with LMDBActivity(str(self.lmdb_path), readonly=True) as kv:
-            change_table, deltas = annotate_change_flags_arrow(
-                signature_rows,
-                kv,
-                domain_col="domain",
-                ns_col="ns_raw",
-                a_col="a",
-                mx_regdom_col="mx_regdom_final",
-                status_col="status",
-                mx_ips_col="mx_ips",
-            )
-
-        # Immediately write initial retry shard (snapshot before enrichment)
-        if retries:
-            initial_retries_path = self.retry_dir / f"{self.file_key}_initial_retries.parquet"
-            initial_retries_table = self.join_tables(retries)
-            await self.write_parquet(initial_retries_table, initial_retries_path)
-            self.log.info(f"Wrote initial retries snapshot to {initial_retries_path}")
-        
-        self.log.info(
-            f"Fetch complete: {len(results)} results, {len(retries)} retries"
-        )
-
         # Build signature rows with ALL attributes for downstream processing
         signature_rows: List[Dict[str, Any]] = []
         for rec in results:
@@ -1000,6 +974,32 @@ class BatchProcessor:
             except Exception as e:
                 self.log.error(f"Failed to build signature row for domain {getattr(rec, 'domain', '<unknown>')}: {e}")
 
+        if not self.lmdb_path:
+            raise RuntimeError("LMDB path not configured on BatchProcessor")
+
+        with LMDBActivity(str(self.lmdb_path), readonly=True) as kv:
+            change_table, deltas = annotate_change_flags_arrow(
+                signature_rows,
+                kv,
+                domain_col="domain",
+                ns_col="ns_raw",
+                a_col="a",
+                mx_regdom_col="mx_regdom_final",
+                status_col="status",
+                mx_ips_col="mx_ips",
+            )
+
+        # Immediately write initial retry shard (snapshot before enrichment)
+        if retries:
+            initial_retries_path = self.retry_dir / f"{self.file_key}_initial_retries.parquet"
+            initial_retries_table = self.join_tables(retries)
+            await self.write_parquet(initial_retries_table, initial_retries_path)
+            self.log.info(f"Wrote initial retries snapshot to {initial_retries_path}")
+        
+        self.log.info(
+            f"Fetch complete: {len(results)} results, {len(retries)} retries"
+        )
+        
         # Annotate change flags using the minimal table; do not overwrite results list
         change_table, deltas = annotate_change_flags_arrow(
             signature_rows,
