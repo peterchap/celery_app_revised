@@ -95,7 +95,7 @@ def process_file(file: str) -> dict[str, Any]:
 
     try:
         dns_app_instance = DNSApplication(
-            directory="/root/celery_project/",
+            directory="/root/celery_app/",
             file_key=file,
             output_directory="/mnt/shared/results/",
         )
