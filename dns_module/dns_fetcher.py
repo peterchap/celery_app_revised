@@ -868,7 +868,7 @@ async def fetch_domain(
             try:
                 ptr_dir = os.getenv('DNS_LMDB_PTR_DIR')
                 if ptr_dir:
-                    dns_lookup.init_lmdb_ptr(ptr_dir, readonly=True, lock=True)
+                    dns_lookup.init_lmdb_ptr(ptr_dir, readonly=True, lock=False)
             except Exception:
                 ptr_dir = None
             
@@ -920,7 +920,7 @@ async def fetch_domain(
                                     else:
                                         # Write directly to PTR LMDB if available
                                         try:
-                                            dns_lookup.init_lmdb_ptr(ptr_dir or os.getenv('DNS_LMDB_PTR_DIR', '/mnt/shared/dns_lmdb_ptr'), readonly=False, lock=True)
+                                            dns_lookup.init_lmdb_ptr(ptr_dir or os.getenv('DNS_LMDB_PTR_DIR', '/mnt/shared/dns_lmdb_ptr'), readonly=True, lock=False)
                                             env_ptr = dns_lookup._lmdb_env_ptr
                                             if env_ptr is not None:
                                                 key = dns_lookup._cache_key('PTR', reverse_name)
