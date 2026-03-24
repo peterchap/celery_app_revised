@@ -120,8 +120,8 @@ _lmdb_ptr_readonly: bool = True
 
 # Semaphores to limit concurrent LMDB reads and prevent MDB_CURSOR_FULL
 # Concurrency is bounded to avoid exhausting LMDB's internal cursor stack
-_lmdb_read_semaphore: asyncio.Semaphore = asyncio.Semaphore(10)
-_lmdb_ptr_read_semaphore: asyncio.Semaphore = asyncio.Semaphore(10)
+_lmdb_read_semaphore: Optional[asyncio.Semaphore] = None
+_lmdb_ptr_read_semaphore: Optional[asyncio.Semaphore] = None
 
 _inmem_cache: Dict[str, Tuple[str, List[str], int, float]] = {}
 _inmem_cache_order: List[str] = []
@@ -511,6 +511,18 @@ def start_lmdb_writer() -> Optional[asyncio.Task]:
 # --------------------------------------------------------------------
 # LMDB reads — semaphore-gated to prevent MDB_CURSOR_FULL under async load
 # --------------------------------------------------------------------
+def _get_lmdb_semaphore() -> asyncio.Semaphore:
+    global _lmdb_read_semaphore
+    if _lmdb_read_semaphore is None:
+        _lmdb_read_semaphore = asyncio.Semaphore(10)
+    return _lmdb_read_semaphore
+
+def _get_lmdb_ptr_semaphore() -> asyncio.Semaphore:
+    global _lmdb_ptr_read_semaphore
+    if _lmdb_ptr_read_semaphore is None:
+        _lmdb_ptr_read_semaphore = asyncio.Semaphore(10)
+    return _lmdb_ptr_read_semaphore
+
 async def _read_from_lmdb(key: str) -> Optional[Tuple[str, List[str], int, float]]:
     """Read a cached DNS result from LMDB (semaphore-gated, runs in executor)."""
     env = _lmdb_env
@@ -533,7 +545,7 @@ async def _read_from_lmdb(key: str) -> Optional[Tuple[str, List[str], int, float
                 return _deserialize_value(bytes(data))
 
     try:
-        async with _lmdb_read_semaphore:
+        async with _get_lmdb_semaphore():
             return await asyncio.get_event_loop().run_in_executor(_get_executor(), _read)
     except Exception as e:
         try:
@@ -571,7 +583,7 @@ async def _read_from_lmdb_ptr(key: str) -> Optional[Tuple[str, List[str], int, f
                 return _deserialize_value(bytes(data))
 
     try:
-        async with _lmdb_ptr_read_semaphore:
+        async with _get_lmdb_ptr_semaphore():
             return await asyncio.get_event_loop().run_in_executor(_get_executor(), _read)
     except Exception as e:
         try:
