@@ -94,13 +94,14 @@ def process_file(file: str) -> dict[str, Any]:
     log.info("Starting task for file=%s workload=%s", file, workload_class)
 
     try:
+        filename = Path(file).name
         dns_app_instance = DNSApplication(
-            directory="/root/celery_project/",
-            file_key=file,
+            directory="/root/celery_app/",
+            file_key=f"inprogress/{filename}",
+            input_directory="/mnt/shared/",
             output_directory="/mnt/shared/results/",
         )
-
-        asyncio.run(run_dns_task(dns_app_instance, file))
+        asyncio.run(run_dns_task(dns_app_instance, f"inprogress/{filename}"))
 
         if input_path.exists():
             processed_path = move_to_processed(input_path)
