@@ -3,7 +3,6 @@ aiohttp
 aiolimiter
 asyncio
 celery[amqp]
-django-celery-beat
 datetime
 dnspython
 duckdb
@@ -15,6 +14,7 @@ loguru
 polars
 pyarrow
 python-dotenv
+python-kv
 pyyaml
 tldextract
 typing
