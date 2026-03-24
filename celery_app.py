@@ -14,7 +14,7 @@ BROKER_URL = os.getenv(
     "pyamqp://admin:1Francis2@10.0.0.2:5672//",
 )
 
-app = Celery("celery_app", broker=BROKER_URL)
+app = Celery("celery_app", broker=BROKER_URL, include=["task"])
 
 # ============================================================
 # Queue definitions
