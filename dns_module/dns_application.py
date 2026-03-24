@@ -464,4 +464,4 @@ class DNSApplication:
             results_path, retries_path = await bp.process(group_domains)
             app_logger.info("Completed TLD group {}: results={} retries={}", tld, results_path, retries_path)
         except Exception as e:
-            app_logger.error("TLD group task failed: %r\n%s", e, traceback.format_exc())
+            app_logger.error("TLD group task failed: %r\n%s", e, traceback.format_exc())(celeryapp) 
