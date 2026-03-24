@@ -258,7 +258,7 @@ async def fetch_domain(
 ) -> DNSRecord:
     """
     Fetch DNS records for a domain using the new dns_lookup module.
-    
+
     This function implements the operational design:
     - Fetches core records (NS, SOA, A) concurrently
     - Uses check_changed_and_enqueue_update to detect changes
@@ -266,19 +266,19 @@ async def fetch_domain(
     - Fetches grouped records (AAAA, MX, TXT) if core succeeds
     - Batches PTR lookups for discovered IPs
     - Checks www/mail subdomain presence before fetching
-    
+
     Args:
         domain: Domain name to fetch.
         resolver: DNS resolver (uses default if None).
         semaphore: Throttling semaphore (uses default if None).
         retry_limit: Maximum retries for failed core lookups.
-    
+
     Returns:
         DNSRecord with status, records, errors, and meta.
     """
     domain = domain.rstrip('.').lower()
     record = DNSRecord(domain=domain, status='error')
-    
+
     # Get defaults if not provided: prefer local Unbound by default
     if resolver is None:
         try:
@@ -289,7 +289,7 @@ async def fetch_domain(
             resolver = dns_lookup.get_default_resolver()
     if semaphore is None:
         semaphore = dns_lookup.default_semaphore()
-    
+
     try:
         # Phase 1: Fetch core records (NS, SOA) concurrently; A from cache (source of truth)
         ns_task = dns_lookup.lookup_ns(domain, resolver, semaphore)
@@ -328,12 +328,12 @@ async def fetch_domain(
                         pass
             except Exception:
                 pass
-        
+
         # Store core rcodes in meta
         record.meta['ns_rcode'] = ns_rcode
         record.meta['soa_rcode'] = soa_rcode
         record.meta['a_rcode'] = a_rcode
-        
+
         # Check if domain is dormant or needs retry depending on core rcodes
         all_nxdomain = all(rc == 'NXDOMAIN' for rc in [ns_rcode, soa_rcode, a_rcode])
         all_servfail = all(rc == 'SERVFAIL' for rc in [ns_rcode, soa_rcode, a_rcode])
@@ -351,14 +351,14 @@ async def fetch_domain(
             record.status = 'needs_retry'
             record.errors['core'] = 'All core lookups timed out'
             return record
-        
+
         # Check which core lookups succeeded
         core_ok = {
             'ns': ns_rcode == 'NOERROR' and ns_answers,
             'soa': soa_rcode == 'NOERROR' and soa_answers,
             'a': a_rcode == 'NOERROR' and a_answers,
         }
-        
+
         # Log core rcodes to aid diagnosis
         try:
             log.info("core rcodes for {}: ns={} soa={} a={}", domain, ns_rcode, soa_rcode, a_rcode)
@@ -370,23 +370,23 @@ async def fetch_domain(
             for attempt in range(retry_limit):
                 retry_tasks = []
                 retry_types = []
-                
+
                 if not core_ok['ns']:
                     retry_tasks.append(dns_lookup.lookup_ns(domain, resolver, semaphore))
                     retry_types.append('ns')
                 if not core_ok['soa']:
                     retry_tasks.append(dns_lookup.lookup_soa(domain, resolver, semaphore))
                     retry_types.append('soa')
-                
+
                 if not retry_tasks:
                     break
-                
+
                 # Small backoff between retries
                 if attempt > 0:
                     await asyncio.sleep(0.2 * (attempt + 1))
-                
+
                 retry_results = await asyncio.gather(*retry_tasks, return_exceptions=True)
-                
+
                 # Update results
                 for i, rtype in enumerate(retry_types):
                     result = retry_results[i]
@@ -404,16 +404,16 @@ async def fetch_domain(
                     elif rtype == 'soa' and rcode == 'NOERROR' and answers:
                         soa_rcode, soa_answers, soa_ttl = rcode, answers, ttl
                         core_ok['soa'] = True
-        
+
         # If no core records succeeded after retries, mark as needs_retry
         if not any(core_ok.values()):
             record.status = 'needs_retry'
             record.errors['core'] = 'All core lookups failed after retries'
             return record
-        
+
         # At least one core lookup succeeded - mark as alive
         record.status = 'alive'
-        
+
         # Store core results
         if ns_answers:
             record.records['NS'] = ns_answers
@@ -424,14 +424,14 @@ async def fetch_domain(
                 record.records['ns'] = ns_answers
         else:
             record.errors['NS'] = ns_rcode
-        
+
         if soa_answers:
             record.records['SOA'] = soa_answers
             try:
                 record.records['soa'] = [str(x) for x in soa_answers]
             except Exception:
                 record.records['soa'] = soa_answers
-            
+
             # Also fetch structured SOA for serial tracking
             try:
                 r_s, soa_struct_list, _ = await dns_lookup.lookup_soa_struct(domain, resolver, semaphore)
@@ -443,7 +443,7 @@ async def fetch_domain(
                 pass
         else:
             record.errors['SOA'] = soa_rcode
-        
+
         if a_answers:
             record.records['A'] = a_answers
             try:
@@ -457,20 +457,20 @@ async def fetch_domain(
             record.meta['a_ttl'] = int(a_ttl) if a_ttl is not None else None
         except Exception:
             pass
-        
+
         # Phase 2: Check if any core record changed
         change_tasks = [
             dns_lookup.check_changed_and_enqueue_update('NS', domain, ns_rcode, ns_answers, ns_ttl),
             dns_lookup.check_changed_and_enqueue_update('SOA', domain, soa_rcode, soa_answers, soa_ttl),
             # A is cache-authoritative; skip change enqueue here
         ]
-        
+
         change_results = await asyncio.gather(*change_tasks, return_exceptions=True)
         any_changed = any(r for r in change_results if not isinstance(r, BaseException) and r)
 
         record.meta['changed'] = str(any_changed)
         # Always fetch grouped records so outputs contain full DNS set
-        
+
         # Phase 3.5: Process NS Host IP
         try:
             ns_answers_list = record.records.get('ns', [])
@@ -478,7 +478,7 @@ async def fetch_domain(
                 first_ns = str(ns_answers_list[0]).rstrip('.')
                 record.records['ns_host_final'] = first_ns
                 record.records['ns_regdom_final'] = reg_domain(first_ns) or ''
-                
+
                 # Resolve NS host IPs via cache
                 try:
                     ns_a_cached = await dns_lookup.get_cached_result('A', first_ns, only_positive=True)
@@ -488,7 +488,7 @@ async def fetch_domain(
                     ns_aaaa_cached = await dns_lookup.get_cached_result('AAAA', first_ns, only_positive=True)
                 except Exception:
                     ns_aaaa_cached = None
-                
+
                 if ns_a_cached and ns_a_cached[1]:
                     try:
                         record.records['ns_host_a'] = [str(x) for x in ns_a_cached[1]]
@@ -499,7 +499,7 @@ async def fetch_domain(
                         record.records['ns_host_aaaa'] = [str(x) for x in ns_aaaa_cached[1]]
                     except Exception:
                         record.records['ns_host_aaaa'] = ns_aaaa_cached[1]
-                
+
                 # Minimal live fallback for A on cache miss
                 if not record.records.get('ns_host_a'):
                     try:
@@ -538,9 +538,9 @@ async def fetch_domain(
             dns_lookup.lookup_caa_struct(domain, resolver, semaphore),
             dns_lookup.lookup_naptr_struct(domain, resolver, semaphore),
         ]
-        
+
         grouped_results = await asyncio.gather(*grouped_tasks, return_exceptions=True)
-        
+
         # Process AAAA
         if not isinstance(grouped_results[0], BaseException):
             aaaa_rcode, aaaa_answers, aaaa_ttl = grouped_results[0]
@@ -552,7 +552,7 @@ async def fetch_domain(
                 record.meta['aaaa_ttl'] = int(aaaa_ttl) if aaaa_ttl is not None else None
             except Exception:
                 pass
-        
+
         # Process MX
         if not isinstance(grouped_results[1], BaseException):
             mx_rcode, mx_answers, mx_ttl = grouped_results[1]
@@ -637,7 +637,7 @@ async def fetch_domain(
                 record.meta['mx_ttl'] = int(mx_ttl) if mx_ttl is not None else None
             except Exception:
                 pass
-        
+
         # Process TXT (with apex fallback when label has no TXT)
         if not isinstance(grouped_results[2], BaseException):
             txt_rcode, txt_answers, txt_ttl = grouped_results[2]
@@ -660,13 +660,13 @@ async def fetch_domain(
                         registered_txt = reg_domain(domain) or domain
                     except Exception:
                         registered_txt = domain
-                    
+
                     # DEBUG: Log fallback attempt
                     logger.info(f"[TXT] Attempting fallback for {domain} -> {registered_txt}")
 
                     if registered_txt and registered_txt != domain:
                         r_reg, a_reg, ttl_reg = await dns_lookup.lookup_txt(registered_txt, resolver, semaphore)
-                        
+
                         # DEBUG: Log fallback result
                         logger.info(f"[TXT] Fallback result for {registered_txt}: rcode={r_reg}, answers={a_reg}")
 
@@ -815,7 +815,7 @@ async def fetch_domain(
                 record.errors['SRV'] = ", ".join([f"{svc}:{rcode}" for svc, rcode in srv_errors.items()])
             if srv_ttl_map:
                 record.meta['srv_ttl'] = srv_ttl_map
-        
+
         # Phase 4: PTR lookups prefer LMDB cache; optionally skip network
         all_ips = set()
         for ip in a_answers:
@@ -826,7 +826,7 @@ async def fetch_domain(
         elif 'AAAA' in record.records:
             for ip in record.records['AAAA']:
                 all_ips.add(str(ip))
-        
+
         # Track MX IPs specifically to enforce fill-on-miss
         mx_ips = set()
         try:
@@ -840,7 +840,7 @@ async def fetch_domain(
                 mx_ips.add(s_ip)
         except Exception:
             pass
-        
+
         # Also store flattened MX IPs for convenience
         if mx_ips:
              record.records['mx_ips'] = list(mx_ips)
@@ -871,7 +871,7 @@ async def fetch_domain(
                     dns_lookup.init_lmdb_ptr(ptr_dir, readonly=True, lock=False)
             except Exception:
                 ptr_dir = None
-            
+
             for ip in all_ips:
                 try:
                     reverse_name = ipaddress.ip_address(ip).reverse_pointer
@@ -881,7 +881,7 @@ async def fetch_domain(
                     cached = await dns_lookup.get_cached_result('PTR', reverse_name, only_positive=True, env_name='ptr')
                 except Exception:
                     cached = None
-                
+
                 if cached and cached[1]:
                     try:
                         val = str(cached[1][0]).rstrip('.')
@@ -894,7 +894,7 @@ async def fetch_domain(
                         do_ptr_miss = os.getenv('DNS_PTR_ON_MISS', '0').strip().lower() in ('1','true','yes','on')
                     except Exception:
                         do_ptr_miss = False
-                    
+
                     # Force fill-on-miss for MX IPs per user instruction matches "main domain A/PTR logic"
                     if ip in mx_ips or (ns_ips and ip in ns_ips):
                         do_ptr_miss = True
@@ -908,7 +908,7 @@ async def fetch_domain(
                                     ptr_map[ip] = val
                                 except Exception:
                                     ptr_map[ip] = str(a_ptr[0])
-                                
+
                                 # Report PTR update to master or write locally
                                 try:
                                     if dns_lookup.is_lmdb_readonly():
@@ -936,7 +936,7 @@ async def fetch_domain(
             if ptr_map:
                 record.records['PTR'] = ptr_map
                 record.records['ptr'] = ptr_map
-                
+
                 # Populate MX-specific PTRs for batch processor
                 if mx_ips:
                     mx_ptrs = []
@@ -968,14 +968,14 @@ async def fetch_domain(
                         record.records['ns_ptr'] = ns_ptrs
                     if ns_ptr_regdoms:
                         record.records['ns_ptr_regdom'] = list(set(ns_ptr_regdoms))
-        
+
         # Phase 5: Check www and mail subdomains
         registered = reg_domain(domain) or domain
         # Include registered domain for downstream processing
         record.records['registered_domain'] = registered
         www_domain = f"www.{registered}"
         mail_domain = f"mail.{registered}"
-        
+
         # Check if www exists
         www_check_rcode, www_check_answers, _ = await dns_lookup.lookup_a(www_domain, resolver, semaphore)
         if www_check_rcode == 'NOERROR' and www_check_answers:
@@ -983,7 +983,7 @@ async def fetch_domain(
             www_a_task = dns_lookup.lookup_a(www_domain, resolver, semaphore)
             www_aaaa_task = dns_lookup.lookup_aaaa(www_domain, resolver, semaphore)
             www_results = await asyncio.gather(www_a_task, www_aaaa_task, return_exceptions=True)
-            
+
             www_records = {}
             if not isinstance(www_results[0], BaseException):
                 rcode, answers, ttl = www_results[0]
@@ -993,10 +993,10 @@ async def fetch_domain(
                 rcode, answers, ttl = www_results[1]
                 if rcode == 'NOERROR' and answers:
                     www_records['AAAA'] = answers
-            
+
             if www_records:
                 record.records['www'] = www_records
-        
+
         # Check if mail exists
         mail_check_rcode, mail_check_answers, _ = await dns_lookup.lookup_a(mail_domain, resolver, semaphore)
         if mail_check_rcode == 'NOERROR' and mail_check_answers:
@@ -1004,7 +1004,7 @@ async def fetch_domain(
             mail_a_task = dns_lookup.lookup_a(mail_domain, resolver, semaphore)
             mail_aaaa_task = dns_lookup.lookup_aaaa(mail_domain, resolver, semaphore)
             mail_results = await asyncio.gather(mail_a_task, mail_aaaa_task, return_exceptions=True)
-            
+
             mail_records = {}
             if not isinstance(mail_results[0], BaseException):
                 rcode, answers, ttl = mail_results[0]
@@ -1014,10 +1014,10 @@ async def fetch_domain(
                 rcode, answers, ttl = mail_results[1]
                 if rcode == 'NOERROR' and answers:
                     mail_records['AAAA'] = answers
-            
+
             if mail_records:
                 record.records['mail'] = mail_records
-        
+
             # Cache-backfill: use LMDB cached answers when live lookups returned empty
             try:
                 _fallback_toggle = os.getenv('DNS_OUTPUT_USE_CACHE_FALLBACK', '1').strip().lower() in ('1','true','yes','on')
@@ -1049,7 +1049,7 @@ async def fetch_domain(
                 )
 
         return record
-        
+
     except Exception as e:
         record.status = 'error'
         record.errors['exception'] = str(e)
