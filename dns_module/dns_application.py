@@ -1,4 +1,3 @@
-# /root/dnsproject/dns_module/dns_application.py
 from __future__ import annotations
 import asyncio
 import dns.asyncresolver
@@ -312,9 +311,9 @@ class DNSApplication:
 
             self.lmdb_path.mkdir(parents=True, exist_ok=True)
 
-            if hasattr(dns_lookup, "init_lmdb"):
-                dns_lookup.init_lmdb(str(self.lmdb_path), readonly=False)
-            if hasattr(dns_lookup, "start_lmdb_writer"):
+            if False:  # LMDBActivity handles LMDB opening - do not double open
+                dns_lookup.init_lmdb(str(self.lmdb_path), readonly=True)
+            if False:  # readonly workers do not write to LMDB
                 dns_lookup.start_lmdb_writer()
             app_logger.info("LMDB initialized at {} (if supported)", self.lmdb_path)
         except Exception:
@@ -464,4 +463,4 @@ class DNSApplication:
             results_path, retries_path = await bp.process(group_domains)
             app_logger.info("Completed TLD group {}: results={} retries={}", tld, results_path, retries_path)
         except Exception as e:
-            app_logger.error("TLD group task failed: %r\n%s", e, traceback.format_exc())(celeryapp) 
+            app_logger.error("TLD group task failed: %r\n%s", e, traceback.format_exc())(celeryapp)
