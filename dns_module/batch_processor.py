@@ -838,7 +838,17 @@ class BatchProcessor:
         if not self.lmdb_path:
             raise RuntimeError("LMDB path not configured on BatchProcessor")
 
-        kv = LMDBActivity(str(self.lmdb_path), readonly=True)
+        with LMDBActivity(str(self.lmdb_path), readonly=True) as kv:
+            change_table, deltas = annotate_change_flags_arrow(
+                signature_rows,
+                kv,
+                domain_col="domain",
+                ns_col="ns_raw",
+                a_col="a",
+                mx_regdom_col="mx_regdom_final",
+                status_col="status",
+                mx_ips_col="mx_ips",
+            )
 
         # Immediately write initial retry shard (snapshot before enrichment)
         if retries:
