@@ -267,4 +267,3 @@ class LMDBActivity:
             self.close()
         except Exception:
             pass
->>>>>>> b130d2fb84873905c0a44677144a6076933c69a6
