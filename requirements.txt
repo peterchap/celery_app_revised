@@ -16,6 +16,7 @@ pyarrow
 python-dotenv
 python-kv
 pyyaml
+redis
 tldextract
 typing
 xxhash
