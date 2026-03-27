@@ -12,7 +12,7 @@ broker_url = os.getenv(
 
 result_backend = os.getenv(
     "CELERY_RESULT_BACKEND",
-    "redis://10.0.0.2:6379/0"
+    "redis://:datazag10.0.0.2:6379/0"
 )
 
 # ============================================================
