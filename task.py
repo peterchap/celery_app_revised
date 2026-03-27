@@ -45,6 +45,8 @@ def classify_filename(filename: str) -> str:
     name = filename.lower()
     if name.startswith("prio_"):
         return "priority"
+    if name.startswith("new_"):
+        return "new_domain"
     if name.startswith("retry_"):
         return "retry"
     if name.startswith("std_"):
@@ -145,3 +147,29 @@ def process_file(file: str) -> dict[str, Any]:
             log.error("Moved failed file to %s", failed_path)
 
         raise
+
+@app.task(name="task.process_file_priority", acks_late=True, soft_time_limit=1800, time_limit=2400)
+def process_file_priority(file: str) -> dict[str, Any]:
+    """
+    Certstream / phishing alert domains.
+    Shorter time limits — these must complete fast.
+    """
+    return process_file(file)
+
+
+@app.task(name="task.process_file_new_domain", acks_late=True, soft_time_limit=3600, time_limit=4200)
+def process_file_new_domain(file: str) -> dict[str, Any]:
+    """
+    First-seen domains — same processing as standard
+    but routed through new_domain_queue for prioritisation.
+    """
+    return process_file(file)
+
+
+@app.task(name="task.process_file_retry", acks_late=True, soft_time_limit=3600, time_limit=4200)
+def process_file_retry(file: str) -> dict[str, Any]:
+    """
+    Previously failed files — same processing pipeline,
+    retry routing handled by masterapp.
+    """
+    return process_file(file)
