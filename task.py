@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import shutil
 from pathlib import Path
 from typing import Any
@@ -113,6 +114,7 @@ def process_file(file: str) -> dict[str, Any]:
                 "file": filename,
                 "relative_path": file,
                 "workload_class": workload_class,
+                "worker": socket.gethostname(),
                 "used_flight": bool(os.getenv("FLIGHT_SERVER_URL", "").strip()),
                 "flight_server_url": os.getenv("FLIGHT_SERVER_URL", "").strip() or None,
             }
