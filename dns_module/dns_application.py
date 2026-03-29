@@ -208,6 +208,10 @@ class DNSApplication:
         if com_chunks:
             processing_order.append(('com', 'chunk', 1, com_chunks[0]))
 
+        # 1.5. High risk domains (process early as priority!)
+        if 'highrisk' in groups:
+            processing_order.append(('highrisk', 'full', 0, groups['highrisk']))
+
         # 2-3. Small TLDs (uk, de)
         for tld in ['uk', 'co.uk', 'de']:
             if tld in groups:
@@ -228,6 +232,10 @@ class DNSApplication:
         # 7. .com chunk 3
         if len(com_chunks) > 2:
             processing_order.append(('com', 'chunk', 3, com_chunks[2]))
+
+        # 8. .net
+        if 'net' in groups:
+            processing_order.append(('net', 'full', 0, groups['net']))
 
         # Log schedule
         app_logger.info(f"\nProcessing {len(processing_order)} tasks:\n")
