@@ -831,8 +831,10 @@ class BatchProcessor:
                         "errors_json": "{}", "meta_json": "{}",
                     })
             expanded_table = pa.Table.from_pylist(expanded_rows, schema=get_dns_expanded_schema())
-            await self.write_output(expanded_table, expanded_path, "dns_expanded")
-            self.log.info("Expanded table written: rows={}", len(expanded_rows))
+            # Isolate threat feeds to their own dataset to avoid mingling with standard 320M domains
+            out_dataset = "hourly_threat" if getattr(self, "retry_limit", 1) == 0 else "dns_expanded"
+            await self.write_output(expanded_table, expanded_path, out_dataset)
+            self.log.info("Expanded table written: rows={}, dataset={}", len(expanded_rows), out_dataset)
         except Exception as e:
             self.log.error("Failed to write expanded table: {}", e, exc_info=True)
             raise
