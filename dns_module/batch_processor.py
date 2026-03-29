@@ -492,10 +492,12 @@ class BatchProcessor:
         semaphore: Optional[asyncio.Semaphore] = None,
         logger: Optional[Any] = None,
         lmdb_path: Optional[str] = None,
+        retry_limit: int = 1,
     ):
         self.file_key = file_key
         self.output_dir = Path(output_dir)
         self.retry_dir = Path(retry_dir)
+        self.retry_limit = retry_limit
 
         raw_lookups = lookups_db_path if lookups_db_path is not None else (NFS_BASE / "lookups")
         try:
@@ -631,7 +633,7 @@ class BatchProcessor:
     async def process(
         self,
         domains: Iterable[str],
-        retry_limit: int = 1
+        retry_limit: Optional[int] = None
     ) -> Tuple[str, Optional[str]]:
         """
         Process a batch of domains.
@@ -648,13 +650,14 @@ class BatchProcessor:
 
         Note: dns_results removed — master updates LMDB from dns_expanded via Flight.
         """
+        active_retry_limit = self.retry_limit if retry_limit is None else retry_limit
         start_time = time.time()
         domain_list = list(domains)
         domain_count = len(domain_list)
 
         self.log.info(
             f"Starting batch processing: {domain_count} domains, "
-            f"{self.workers} workers, file_key={self.file_key}"
+            f"{self.workers} workers, file_key={self.file_key}, retry_limit={active_retry_limit}"
         )
 
         # Step 1: Fetch DNS records
@@ -662,7 +665,7 @@ class BatchProcessor:
             domain_list,
             semaphore=self.semaphore,
             workers=self.workers,
-            retry_limit=retry_limit
+            retry_limit=active_retry_limit
         )
 
         self.log.info(f"Fetch complete: {len(results)} results, {len(retries)} retries")

@@ -256,6 +256,7 @@ class DNSApplication:
 
             # Create BatchProcessor
             def create_bp(file_key, semaphore, workers):
+                is_prio = "prio_" in self.file_key.lower()
                 return BatchProcessor(
                     file_key=file_key,
                     output_dir=self.output_directory,
@@ -266,6 +267,7 @@ class DNSApplication:
                     lmdb_path=str(self.lmdb_path) if getattr(self, "lmdb_path", None) else None,
                     lookups_db_path=os.getenv("LOOKUPS_DB_PATH"),
                     flight_server_url=os.getenv("FLIGHT_SERVER_URL"),
+                    retry_limit=0 if is_prio else 1,
                 )
 
             bp = create_bp(
@@ -387,6 +389,7 @@ class DNSApplication:
                         suggested_qps = int(workers or 1)
                         cap = CONFIG.effective_concurrency_for_tld(tld, suggested_qps)
                         sem_capped = asyncio.Semaphore(cap)
+                        is_prio = "prio_" in self.file_key.lower()
 
                         return BatchProcessor(
                             file_key=file_key,
@@ -398,6 +401,7 @@ class DNSApplication:
                             lmdb_path=str(self.lmdb_path) if getattr(self, "lmdb_path", None) else None,
                             lookups_db_path=os.getenv("LOOKUPS_DB_PATH"),
                             flight_server_url=os.getenv("FLIGHT_SERVER_URL"),
+                            retry_limit=0 if is_prio else 1,
                         )
 
                     # Process TLD in chunks
@@ -447,6 +451,7 @@ class DNSApplication:
     async def _run_group(self, tld: str, group_domains: List[str], original_table: pa.Table, label: str):
         safe_key = self.file_key.replace("/", "_")
         # Pass shared semaphore and app_logger down to BatchProcessor so everything uses same settings
+        is_prio = "prio_" in self.file_key.lower()
         bp = BatchProcessor(
             file_key=f"{safe_key}_{label}_{tld}",
             output_dir=self.output_directory,
@@ -458,6 +463,7 @@ class DNSApplication:
             # Allow overriding the DuckDB lookups path for local/dev runs
             lookups_db_path=os.getenv("LOOKUPS_DB_PATH") if os.getenv("LOOKUPS_DB_PATH") else None,
             flight_server_url=os.getenv("FLIGHT_SERVER_URL"),
+            retry_limit=0 if is_prio else 1,
         )
         try:
             results_path, retries_path = await bp.process(group_domains)
