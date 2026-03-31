@@ -412,6 +412,7 @@ def _dnsrecord_to_expanded_row(rec: DNSRecord) -> Dict[str, Any]:
 def get_dns_expanded_schema():
     return pa.schema([
         pa.field("domain", pa.string()),
+        pa.field("source", pa.string()),
         pa.field("status", pa.string()),
         pa.field("records_json", pa.string()),
         pa.field("registered_domain", pa.string()),
@@ -493,8 +494,10 @@ class BatchProcessor:
         logger: Optional[Any] = None,
         lmdb_path: Optional[str] = None,
         retry_limit: int = 1,
+        source_feed: str = "zone_file",
     ):
         self.file_key = file_key
+        self.source_feed = source_feed
         self.output_dir = Path(output_dir)
         self.retry_dir = Path(retry_dir)
         self.retry_limit = retry_limit
@@ -819,10 +822,13 @@ class BatchProcessor:
             expanded_rows = []
             for rec in results:
                 try:
-                    expanded_rows.append(_dnsrecord_to_expanded_row(rec))
+                    row = _dnsrecord_to_expanded_row(rec)
+                    row["source"] = getattr(self, "source_feed", "zone_file")
+                    expanded_rows.append(row)
                 except Exception:
                     expanded_rows.append({
                         "domain": str(getattr(rec, "domain", "") or ""),
+                        "source": getattr(self, "source_feed", "zone_file"),
                         "status": str(getattr(rec, "status", "") or "error"),
                         "registered_domain": "", "ns": "", "soa": "", "a": "",
                         "aaaa": "", "mx": "", "txt": "", "cname": "", "caa": "",

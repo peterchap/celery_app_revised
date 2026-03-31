@@ -276,6 +276,7 @@ class DNSApplication:
                     lookups_db_path=os.getenv("LOOKUPS_DB_PATH"),
                     flight_server_url=os.getenv("FLIGHT_SERVER_URL"),
                     retry_limit=0 if is_prio else 1,
+                    source_feed=getattr(self, "source_feed", "zone_file")
                 )
 
             bp = create_bp(
@@ -307,8 +308,25 @@ class DNSApplication:
         """
         input_path = Path(self.input_directory) / self.file_key
         app_logger.info("Reading input table {}", input_path)
-        table = pq.read_table(input_path, columns=["domain", "ns", "ip", "country_dm"])
+        
+        try:
+            # Replaced strict schema with single column pull accommodating all source types broadly 
+            table = pq.read_table(input_path, columns=["domain"])
+        except Exception as e:
+            app_logger.error(f"Failed to read Parquet cleanly: {e}")
+            raise
+            
         app_logger.info("Read {} rows from {}", table.num_rows, input_path)
+
+        fk_lower = self.file_key.lower()
+        if "brand_hits" in fk_lower:
+            self.source_feed = "certstream_brand_hits"
+        elif "new_domains" in fk_lower:
+            self.source_feed = "certstream_new_domains"
+        elif "signals" in fk_lower:
+            self.source_feed = "certstream_signals"
+        else:
+            self.source_feed = "zone_file"
 
         # Initialize LMDB in dns_lookup (if the function exists)
         try:
@@ -410,6 +428,7 @@ class DNSApplication:
                             lookups_db_path=os.getenv("LOOKUPS_DB_PATH"),
                             flight_server_url=os.getenv("FLIGHT_SERVER_URL"),
                             retry_limit=0 if is_prio else 1,
+                            source_feed=getattr(self, "source_feed", "zone_file")
                         )
 
                     # Process TLD in chunks
@@ -472,6 +491,7 @@ class DNSApplication:
             lookups_db_path=os.getenv("LOOKUPS_DB_PATH") if os.getenv("LOOKUPS_DB_PATH") else None,
             flight_server_url=os.getenv("FLIGHT_SERVER_URL"),
             retry_limit=0 if is_prio else 1,
+            source_feed=getattr(self, "source_feed", "zone_file")
         )
         try:
             results_path, retries_path = await bp.process(group_domains)
