@@ -851,8 +851,7 @@ class BatchProcessor:
             await self.write_output(domain_table, self.output_dir / f"{self.file_key}_graph_domain.parquet", "entity_domain")
             await self.write_output(ip_table, self.output_dir / f"{self.file_key}_graph_ip.parquet", "entity_ip")
             await self.write_output(edge_table, self.output_dir / f"{self.file_key}_graph_edge.parquet", "entity_edge")
-            self.log.info(f"Graph tables written: {domain_table.num_rows} domains, "
-                          f"{ip_table.num_rows} IPs, {edge_table.num_rows} edges.")
+            self.log.info(f"Graph tables written: {domain_table.num_rows} domains, {ip_table.num_rows} IPs, {edge_table.num_rows} edges.")
         except Exception as e:
             self.log.error(f"Failed to write graph parquets: {e}", exc_info=True)
 
