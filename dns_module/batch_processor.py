@@ -403,6 +403,40 @@ def _dnsrecord_to_expanded_row(rec: DNSRecord) -> Dict[str, Any]:
         "ns_ip_int": getattr(rec, "ns_ip_int", None) or g("ns_ip_int"),
         "ns_ptr": _join_list(g("ns_ptr")),
         "ns_ptr_regdom": _join_list(g("ns_ptr_regdom")),
+        "spf": _join_list(g("spf")),
+        "dmarc": _join_list(g("dmarc")),
+        "bimi": _join_list(g("bimi")),
+        "www_a": _join_list(g("www_a")),
+        "www_int": getattr(rec, "www_int", None) or g("www_int"),
+        "www_ptr": _join_list(g("www_ptr")),
+        "mail_a": _join_list(g("mail_a")),
+        "mail_int": getattr(rec, "mail_int", None) or g("mail_int"),
+        "mail_ptr": _join_list(g("mail_ptr")),
+        "mail_cname": _join_list(g("mail_cname")),
+        "mail_mx_domain": _join_list(g("mail_mx_domain")),
+        "mail_mx_tld": _join_list(g("mail_mx_tld")),
+        "mail_spf": _join_list(g("mail_spf")),
+        "mail_dmarc": _join_list(g("mail_dmarc")),
+        "mx_banner_raw": getattr(rec, "mx_banner_raw", "") or "",
+        "mx_banner_host": getattr(rec, "mx_banner_host", "") or "",
+        "mx_banner_details": getattr(rec, "mx_banner_details", "") or "",
+        "mx_banner_provider": getattr(rec, "mx_banner_provider", "") or "",
+        "mx_banner_category": getattr(rec, "mx_banner_category", "") or "",
+        "has_mta_sts": bool(getattr(rec, "has_mta_sts", False)),
+        "mta_sts_txt": getattr(rec, "mta_sts_txt", "") or "",
+        "mta_sts_mode": getattr(rec, "mta_sts_mode", "") or "",
+        "mta_sts_max_age": getattr(rec, "mta_sts_max_age", None),
+        "mta_sts_id": getattr(rec, "mta_sts_id", "") or "",
+        "tlsrpt_rua": getattr(rec, "tlsrpt_rua", "") or "",
+        "smtp_cert_ok": getattr(rec, "smtp_cert_ok", None),
+        "smtp_cert_days_left": getattr(rec, "smtp_cert_days_left", None),
+        "smtp_cert_issuer": getattr(rec, "smtp_cert_issuer", "") or "",
+        "https_cert_ok": getattr(rec, "https_cert_ok", None),
+        "https_cert_days_left": getattr(rec, "https_cert_days_left", None),
+        "https_cert_issuer": getattr(rec, "https_cert_issuer", "") or "",
+        "https_cert_san_count": getattr(rec, "https_cert_san_count", None),
+        "dnssec": bool(getattr(rec, "dnssec", False)),
+        "soa_serial": getattr(rec, "soa_serial", None),
         "records_json": records_json,
         "errors_json": errors_json,
         "meta_json": meta_json,
@@ -414,6 +448,7 @@ def get_dns_expanded_schema():
         pa.field("domain", pa.string()),
         pa.field("source", pa.string()),
         pa.field("status", pa.string()),
+        pa.field("timestamp", pa.float64()),
         pa.field("records_json", pa.string()),
         pa.field("registered_domain", pa.string()),
         pa.field("ns", pa.string()),
@@ -476,6 +511,40 @@ def get_dns_expanded_schema():
         pa.field("ns_ip_int", pa.int64()),
         pa.field("ns_ptr", pa.string()),
         pa.field("ns_ptr_regdom", pa.string()),
+        pa.field("spf", pa.string()),
+        pa.field("dmarc", pa.string()),
+        pa.field("bimi", pa.string()),
+        pa.field("www_a", pa.string()),
+        pa.field("www_int", pa.int64()),
+        pa.field("www_ptr", pa.string()),
+        pa.field("mail_a", pa.string()),
+        pa.field("mail_int", pa.int64()),
+        pa.field("mail_ptr", pa.string()),
+        pa.field("mail_cname", pa.string()),
+        pa.field("mail_mx_domain", pa.string()),
+        pa.field("mail_mx_tld", pa.string()),
+        pa.field("mail_spf", pa.string()),
+        pa.field("mail_dmarc", pa.string()),
+        pa.field("mx_banner_raw", pa.string()),
+        pa.field("mx_banner_host", pa.string()),
+        pa.field("mx_banner_details", pa.string()),
+        pa.field("mx_banner_provider", pa.string()),
+        pa.field("mx_banner_category", pa.string()),
+        pa.field("has_mta_sts", pa.bool_()),
+        pa.field("mta_sts_txt", pa.string()),
+        pa.field("mta_sts_mode", pa.string()),
+        pa.field("mta_sts_max_age", pa.int64()),
+        pa.field("mta_sts_id", pa.string()),
+        pa.field("tlsrpt_rua", pa.string()),
+        pa.field("smtp_cert_ok", pa.bool_()),
+        pa.field("smtp_cert_days_left", pa.int32()),
+        pa.field("smtp_cert_issuer", pa.string()),
+        pa.field("https_cert_ok", pa.bool_()),
+        pa.field("https_cert_days_left", pa.int32()),
+        pa.field("https_cert_issuer", pa.string()),
+        pa.field("https_cert_san_count", pa.int32()),
+        pa.field("dnssec", pa.bool_()),
+        pa.field("soa_serial", pa.int64()),
         pa.field("errors_json", pa.string()),
         pa.field("meta_json", pa.string()),
     ])
@@ -824,16 +893,31 @@ class BatchProcessor:
                 try:
                     row = _dnsrecord_to_expanded_row(rec)
                     row["source"] = getattr(self, "source_feed", "zone_file")
+                    row["timestamp"] = time.time()
                     expanded_rows.append(row)
                 except Exception:
                     expanded_rows.append({
                         "domain": str(getattr(rec, "domain", "") or ""),
                         "source": getattr(self, "source_feed", "zone_file"),
                         "status": str(getattr(rec, "status", "") or "error"),
+                        "timestamp": time.time(),
                         "registered_domain": "", "ns": "", "soa": "", "a": "",
                         "aaaa": "", "mx": "", "txt": "", "cname": "", "caa": "",
                         "naptr": "", "srv": "", "ptr": "", "www": "", "www_cname": "",
                         "mail_mx": "", "mx_host_final": "", "mx_regdom_final": "",
+                        
+                        "spf": "", "dmarc": "", "bimi": "", "www_a": "", "www_int": None, 
+                        "www_ptr": "", "mail_a": "", "mail_int": None, "mail_ptr": "", 
+                        "mail_cname": "", "mail_mx_domain": "", "mail_mx_tld": "", 
+                        "mail_spf": "", "mail_dmarc": "", "mx_banner_raw": "", 
+                        "mx_banner_host": "", "mx_banner_details": "", "mx_banner_provider": "", 
+                        "mx_banner_category": "", "has_mta_sts": False, "mta_sts_txt": "", 
+                        "mta_sts_mode": "", "mta_sts_max_age": None, "mta_sts_id": "", 
+                        "tlsrpt_rua": "", "smtp_cert_ok": None, "smtp_cert_days_left": None, 
+                        "smtp_cert_issuer": "", "https_cert_ok": None, "https_cert_days_left": None, 
+                        "https_cert_issuer": "", "https_cert_san_count": None, "dnssec": False, 
+                        "soa_serial": None,
+                        
                         "errors_json": "{}", "meta_json": "{}",
                     })
             expanded_table = pa.Table.from_pylist(expanded_rows, schema=get_dns_expanded_schema())
@@ -845,15 +929,7 @@ class BatchProcessor:
             self.log.error("Failed to write expanded table: {}", e, exc_info=True)
             raise
 
-        # Step 6: Graph tables
-        try:
-            domain_table, ip_table, edge_table = self._build_graph_tables(results)
-            await self.write_output(domain_table, self.output_dir / f"{self.file_key}_graph_domain.parquet", "entity_domain")
-            await self.write_output(ip_table, self.output_dir / f"{self.file_key}_graph_ip.parquet", "entity_ip")
-            await self.write_output(edge_table, self.output_dir / f"{self.file_key}_graph_edge.parquet", "entity_edge")
-            self.log.info(f"Graph tables written: {domain_table.num_rows} domains, {ip_table.num_rows} IPs, {edge_table.num_rows} edges.")
-        except Exception as e:
-            self.log.error(f"Failed to write graph parquets: {e}", exc_info=True)
+        # Step 6: Legacy Graph tables deprecated in favor of fully amalgamated 'domain_expanded' DataLake.
 
         # Step 7: Write retries parquet
         retries_path = None
