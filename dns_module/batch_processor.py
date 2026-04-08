@@ -263,6 +263,9 @@ def _dnsrecord_to_expanded_row(rec: DNSRecord) -> Dict[str, Any]:
     errors = getattr(rec, "errors", {}) or {}
 
     def g(key: str) -> Any:
+        val = getattr(rec, key, None)
+        if val is not None and val != "":
+            return val
         return rd.get(key)
 
     try:
