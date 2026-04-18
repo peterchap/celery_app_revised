@@ -87,6 +87,11 @@ class DNSRecords:
     https_cert_issuer: str | None
     https_cert_san_count: int | None
 
+    # security.txt
+    has_security_txt: bool
+    security_txt_url: str
+    security_txt_preview: str
+
     # --- SMTP banner (MX) ---
     mx_banner_raw: Optional[str]
     mx_banner_host: Optional[str]

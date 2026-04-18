@@ -440,6 +440,9 @@ def _dnsrecord_to_expanded_row(rec: DNSRecord) -> Dict[str, Any]:
         "https_cert_san_count": getattr(rec, "https_cert_san_count", None),
         "dnssec": bool(getattr(rec, "dnssec", False)),
         "soa_serial": getattr(rec, "soa_serial", None),
+        "has_security_txt": bool(getattr(rec, "has_security_txt", False)),
+        "security_txt_url": getattr(rec, "security_txt_url", "") or "",
+        "security_txt_preview": getattr(rec, "security_txt_preview", "") or "",
         "records_json": records_json,
         "errors_json": errors_json,
         "meta_json": meta_json,
@@ -550,6 +553,9 @@ def get_dns_expanded_schema():
         pa.field("soa_serial", pa.int64()),
         pa.field("errors_json", pa.string()),
         pa.field("meta_json", pa.string()),
+        pa.field("has_security_txt", pa.bool_()),
+        pa.field("security_txt_url", pa.string()),
+        pa.field("security_txt_preview", pa.string()),
     ])
 
 

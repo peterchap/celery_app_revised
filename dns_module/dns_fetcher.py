@@ -9,7 +9,7 @@ from typing import Optional, List, Any, Dict, cast, Iterable, Tuple
 from dotenv import load_dotenv
 from .dns_records import DNSRecords, DNSRecord
 from . import dns_lookup
-from .probes import probe_https_cert, probe_smtp_starttls_cert
+from .probes import probe_https_cert, probe_smtp_starttls_cert, probe_security_txt
 from .policy import detect_mta_sts, fetch_tlsrpt_rua
 from .dns_utils import (
     to_ascii_hostname, reg_domain, ip_to_int,
@@ -1386,6 +1386,14 @@ class DNSFetcher:
             except Exception:
                 tlsrpt_rua = ""
 
+            # Security.txt probe
+            sec_txt_ok, sec_txt_url, sec_txt_preview = False, "", ""
+            if self._run_blocking_probes and registered:
+                try:
+                    sec_txt_ok, sec_txt_url, sec_txt_preview = await probe_security_txt(registered, probe_timeout=5.0)
+                except Exception:
+                    pass
+
             # Optional blocking probes (HTTPS/SNTP cert) for under-customer MX
             https_ok = https_days = https_issuer = https_san = None
             smtp_ok = smtp_days = smtp_issuer = None
@@ -1678,6 +1686,9 @@ class DNSFetcher:
                 https_cert_days_left=https_days,
                 https_cert_issuer=https_issuer or "",
                 https_cert_san_count=https_san_count,
+                has_security_txt=sec_txt_ok,
+                security_txt_url=sec_txt_url,
+                security_txt_preview=sec_txt_preview,
                 has_mta_sts=bool(has_mta_sts),
                 mta_sts_txt=mta_sts_txt or "",
                 mta_sts_mode=mta_sts_mode or "",
@@ -1878,6 +1889,9 @@ class DNSFetcher:
             smtp_ok,
             smtp_days,
             smtp_issuer,
+            sec_txt_ok,
+            sec_txt_url,
+            sec_txt_preview,
         ) = await _gather_mx_data(mx_host_input)
 
         # WWW host
@@ -2005,6 +2019,9 @@ class DNSFetcher:
             https_cert_days_left=https_days,
             https_cert_issuer=https_issuer or "",
             https_cert_san_count=(len(https_san.split("|")) if (isinstance(https_san, str) and https_san) else 0),
+            has_security_txt=sec_txt_ok,
+            security_txt_url=sec_txt_url,
+            security_txt_preview=sec_txt_preview,
             has_mta_sts=bool(has_mta_sts),
             mta_sts_txt=mta_sts_txt or "",
             mta_sts_mode=mta_sts_mode or "",
@@ -2058,6 +2075,7 @@ class DNSFetcher:
         tlsrpt_rua = ""
         https_ok = https_days = https_issuer = https_san = None
         smtp_ok = smtp_days = smtp_issuer = None
+        sec_txt_ok, sec_txt_url, sec_txt_preview = False, "", ""
 
         if host_input:
             try:
@@ -2214,7 +2232,9 @@ class DNSFetcher:
             smtp_ok,
             smtp_days,
             smtp_issuer,
-
+            sec_txt_ok,
+            sec_txt_url,
+            sec_txt_preview,
         )
 
 

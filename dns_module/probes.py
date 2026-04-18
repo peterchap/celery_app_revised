@@ -204,3 +204,31 @@ async def probe_smtp_starttls_cert(
         return False, None, None
     except Exception:
         return False, None, None
+
+async def probe_security_txt(domain: str, probe_timeout: float = 3.0) -> Tuple[bool, str, str]:
+    import urllib.request
+    def _fetch():
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        paths = [
+            f"https://{domain}/.well-known/security.txt",
+            f"https://{domain}/security.txt"
+        ]
+        for url in paths:
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=probe_timeout, context=ctx) as response:
+                    if response.status == 200:
+                        content = response.read().decode('utf-8', errors='ignore')
+                        if "Contact:" in content:
+                            return True, str(response.geturl()), content[:250].strip()
+            except Exception:
+                pass
+        return False, "", ""
+        
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=probe_timeout + 1.0)
+    except Exception:
+        return False, "", ""
