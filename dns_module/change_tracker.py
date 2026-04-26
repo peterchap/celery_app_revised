@@ -1,264 +1,286 @@
-# /root/celery_app/dns_module/change_tracker.py
+# dns_module/change_tracker.py
 from __future__ import annotations
 
-import hashlib
+import json
 import time
 import os
 import csv
-from typing import List, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
 
-# Reuse the same LMDB wrapper you installed earlier
 from kv.lmdb_store import LMDBActivity
 
+# ── Delta CSV columns ─────────────────────────────────────────────────────────
+# v1 had: domain, is_active, last_seen_ts, dns_sig, mx_regdom, mx_ips
+# v2 adds: ns, a, mx, cname, ptr, changed_records
+# Master can call kv.upsert_from_delta(row) directly with no further lookups.
+DELTA_FIELDS = [
+    "domain",
+    "is_active",
+    "last_seen_ts",
+    "dns_sig",
+    "ns",               # JSON array  e.g. '["ns1.foo.com","ns2.foo.com"]'
+    "a",                # JSON array  e.g. '["1.2.3.4"]'
+    "mx",               # JSON array  e.g. '["mail.foo.com"]'
+    "cname",            # JSON array
+    "ptr",              # JSON array
+    "mx_regdom",        # plain string
+    "mx_ips",           # pipe-joined string (kept for compat)
+    "changed_records",  # JSON array  e.g. '["ns","mx"]', [] = new domain
+]
 
-# --- DNS signature (must match LMDBActivity._sig) ----------------------------
-def dns_sig(ns: str, a: str, mx_regdom: str) -> str:
-    ns = (ns or "")
-    a  = (a or "")
-    mx = (mx_regdom or "")
-    h = hashlib.sha1()
-    h.update(ns.encode())
-    h.update(b"|")
-    h.update(a.encode())
-    h.update(b"|")
-    h.update(mx.encode())
-    return "sha1:" + h.hexdigest()
+
+# ── Normalisation ─────────────────────────────────────────────────────────────
+
+def _to_list(val: Any) -> List[str]:
+    """Normalise any wire format → sorted deduplicated list of strings."""
+    if val is None:
+        return []
+    if isinstance(val, list):
+        items = [str(x).strip().rstrip(".").lower() for x in val if x]
+    elif isinstance(val, str):
+        items = []
+        for part in val.replace("\n", " ").split("|"):
+            for sub in part.split(","):
+                for tok in sub.split():
+                    s = tok.strip().rstrip(".").lower()
+                    if s:
+                        items.append(s)
+    else:
+        items = [str(val).strip().rstrip(".").lower()] if val else []
+    seen, out = set(), []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return sorted(out)
 
 
-# --- Row-by-row evaluator ----------------------------------------------------
+def _jdump(lst: List[str]) -> str:
+    return json.dumps(lst, separators=(",", ":"))
+
+
+# ── Signature helper (kept for any callers that used the old module-level fn) ─
+
+def dns_sig(ns: str, a: str, mx_regdom: str) -> bytes:
+    """Thin wrapper — delegates to LMDBActivity for consistency."""
+    return LMDBActivity.compute_signature_values(
+        ns=ns, a=a, mx_regdom=mx_regdom,
+        registered_domain="", mx_ips="",
+    )
+
+
+# ── Core per-row evaluator ────────────────────────────────────────────────────
+
 def _row_needs_enrich(
-    kv: LMDBActivity,
-    domain: str,
-    ns: str,
-    a: str,
-    mx_regdom: str,
-    status: str,
-    registered_domain: str,
-    mx_ips: str,
-) -> Tuple[bool, bool, bytes]:
+    prev:      Optional[Dict],   # result of kv.batch_get_sig() for this domain
+    domain:    str,
+    ns:        List[str],
+    a:         List[str],
+    mx:        List[str],
+    cname:     List[str],
+    ptr:       List[str],
+    status:    str,
+    # kept for signature compat — still used to compute dns_sig for delta
+    ns_str:    str = "",
+    a_str:     str = "",
+    mx_regdom: str = "",
+    reg_domain: str = "",
+    mx_ips:    str = "",
+) -> Tuple[bool, bool, bytes, List[str]]:
     """
-    Returns (needs_enrich, reactivated, new_sig)
-      - needs_enrich: True if no prior state OR DNS sig changed OR reactivated
-      - reactivated:  True if previous is_active==False and current now active
-      - new_sig:      the computed dns_sig for delta file
-    """
-    cur_active = (str(status or "").upper() != "NXDOMAIN")
-    # Compute signature using LMDBActivity's scheme for consistency
-    try:
-        new = LMDBActivity.compute_signature_values(
-            ns=ns,
-            a=a,
-            mx_regdom=mx_regdom,
-            registered_domain=registered_domain or domain,
-            mx_ips=mx_ips,
-        )
-    except Exception:
-        # Fallback: compute from dict to be permissive
-        new = LMDBActivity.compute_signature_dict({
-            "ns": ns,
-            "a": a,
-            "mx_regdom": mx_regdom,
-            "registered_domain": registered_domain or domain,
-            "mx_ips": mx_ips,
-        })
+    Returns (needs_enrich, reactivated, new_sig_bytes, changed_record_types).
 
-    prev = kv.get_sig(domain)
+    needs_enrich          True if domain is new, reactivated, or any record changed
+    reactivated           True if previously inactive and now active
+    new_sig_bytes         sha1 bytes for the delta CSV
+    changed_record_types  list of record type strings that actually differ
+    """
+    is_active = str(status or "").upper() != "NXDOMAIN"
+
+    # Compute sig the same way as before so delta CSV is consistent
+    new_sig = LMDBActivity.compute_signature_values(
+        ns=ns_str or "|".join(ns),
+        a=a_str or "|".join(a),
+        mx_regdom=mx_regdom or (mx[0] if mx else ""),
+        registered_domain=reg_domain or domain,
+        mx_ips=mx_ips,
+    )
+
     if prev is None:
-        # New domain → enrich
-        return True, False, new
+        # New domain — always enrich, no prior values to diff
+        return True, False, new_sig, []
 
-    # Reactivation
-    prev_active = bool(prev.get("is_active", True))
-    reactivated = (not prev_active) and cur_active
+    was_active  = bool(prev.get("is_active", True))
+    reactivated = (not was_active) and is_active
 
-    # Signature change
-    changed  = (prev != new)
+    # Compare actual record values, not hashes
+    changed: List[str] = []
+    for rtype, new_val in (("ns", ns), ("a", a), ("mx", mx),
+                            ("cname", cname), ("ptr", ptr)):
+        old_val = sorted(prev.get(rtype) or [])
+        if new_val != old_val:
+            changed.append(rtype)
 
-    needs = (reactivated or changed or (not prev))
-    return needs, reactivated, new
+    # For v1 records we don't have old values — fall back to sig comparison
+    if prev.get("_v1"):
+        stored_sig = prev.get("sig", "")
+        new_sig_str = new_sig.decode("ascii", "ignore")
+        if stored_sig != new_sig_str:
+            # Something changed but we don't know what — mark all three key types
+            changed = [r for r in ("ns", "a", "mx") if r not in changed] + changed
+
+    needs = bool(reactivated or changed)
+    return needs, reactivated, new_sig, changed
 
 
-# --- Vectorized annotator over an Arrow table --------------------------------
+# ── Vectorised annotator ──────────────────────────────────────────────────────
+
 def annotate_change_flags_arrow(
-    table: pa.Table,
-    kv: LMDBActivity,
+    table: List[Dict] | pa.Table,
+    kv:    LMDBActivity,
     *,
-    domain_col: str = "domain",
-    ns_col: str = "ns",
-    a_col: str = "a",
-    mx_regdom_col: str = "mx_regdom_final",
-    status_col: str = "status",
+    domain_col:            str = "domain",
+    ns_col:                str = "ns_raw",       # pipe-joined string (for sig compat)
+    a_col:                 str = "a",
+    mx_regdom_col:         str = "mx_regdom_final",
+    status_col:            str = "status",
     registered_domain_col: str = "registered_domain",
-    mx_ips_col: str = "mx_ips",
-) -> Tuple[pa.Table, List[Dict[str, str]]]:
+    mx_ips_col:            str = "mx_ips",
+    # List-form columns — preferred for actual value comparison
+    ns_list_col:           str = "ns_list_norm",
+    a_list_col:            str = "a_list",
+    mx_list_col:           str = "mx_list",
+    cname_list_col:        str = "cname_list",
+    ptr_list_col:          str = "ptr_list",
+) -> Tuple[pa.Table, List[Dict]]:
     """
-    Adds two bool columns to `table`:
-      - needs_enrich
-      - reactivated
+    Annotates a batch of resolved DNS rows with change flags.
 
-    Also returns a list of delta dicts to write back to master:
-      {domain,is_active,last_seen_ts,dns_sig,mx_regdom,mx_ips}
+    Adds two bool columns to the returned Arrow table:
+      needs_enrich   True if domain is new or any record changed
+      reactivated    True if domain was inactive and is now active
+
+    Returns a list of delta dicts — one per changed/new domain.
+    Each delta carries actual record lists so the master can call
+    kv.upsert_from_delta(delta) with no further LMDB reads.
     """
-    # Accept list input by converting to an Arrow Table (supports dicts or objects like DNSRecord)
-    if isinstance(table, list):
+    # ── Normalise input ───────────────────────────────────────────
+    if isinstance(table, pa.Table):
+        rows = table.to_pylist()
+    elif isinstance(table, list):
         if not table:
-            # Build an empty Arrow table with required columns and explicit types
-            table = pa.Table.from_arrays(
-                [
-                    pa.array([], type=pa.string()),  # domain
-                    pa.array([], type=pa.string()),  # ns
-                    pa.array([], type=pa.string()),  # a
-                    pa.array([], type=pa.string()),  # mx_regdom_final
-                    pa.array([], type=pa.string()),  # status
-                    pa.array([], type=pa.string()),  # mx_ips
-                ],
-                names=[domain_col, ns_col, a_col, mx_regdom_col, status_col, mx_ips_col]
-            )
-        elif isinstance(table[0], dict):
-            keys = set()
-            for row in table:
-                keys.update(row.keys())
-            data = {k: [r.get(k) for r in table] for k in keys}
-            table = pa.Table.from_pydict(data)
-        else:
-            # Attempt to coerce generic objects (e.g., DNSRecord) into the required columns
-            def _to_str_join(v):
-                if v is None:
-                    return ""
-                if isinstance(v, list):
-                    return "|".join([str(x) for x in v if x is not None])
-                return str(v)
+            empty = pa.table({
+                domain_col:     pa.array([], type=pa.string()),
+                "needs_enrich": pa.array([], type=pa.bool_()),
+                "reactivated":  pa.array([], type=pa.bool_()),
+            })
+            return empty, []
+        rows = table
+    else:
+        raise TypeError(f"annotate_change_flags_arrow: expected list or pa.Table, got {type(table)}")
 
-            rows: List[Dict[str, str]] = []
-            for obj in table:
-                try:
-                    domain_val = getattr(obj, "domain", None)
-                    status_val = getattr(obj, "status", None)
-                    records = getattr(obj, "records", None)
+    # ── Single bulk LMDB read for the whole batch ─────────────────
+    domains = [(r.get(domain_col) or "").lower() for r in rows]
+    prev_map = kv.batch_get_sig(domains)
 
-                    ns_v = ""
-                    a_v = ""
-                    mx_v = ""
-                    mx_ips_v = ""
-                    if isinstance(records, dict):
-                        ns_v = _to_str_join(records.get("ns", records.get("ns1")))
-                        a_v = _to_str_join(records.get("a"))
-                        mx_v = _to_str_join(records.get("mx_regdom_final", records.get("mx_domain")))
-                        mx_ips_v = _to_str_join(records.get("mx_ips"))
-                    else:
-                        ns_v = _to_str_join(getattr(obj, "ns", getattr(obj, "ns1", None)))
-                        a_v = _to_str_join(getattr(obj, "a", None))
-                        mx_v = _to_str_join(getattr(obj, "mx_regdom_final", getattr(obj, "mx_domain", None)))
-                        mx_ips_v = _to_str_join(getattr(obj, "mx_ips", None))
-
-                    row = {
-                        domain_col: str(domain_val or "").lower(),
-                        ns_col: ns_v,
-                        a_col: a_v,
-                        mx_regdom_col: str(mx_v or "").lower(),
-                        status_col: str(status_val or ""),
-                        mx_ips_col: str(mx_ips_v or ""),
-                    }
-                    rows.append(row)
-                except Exception:
-                    # Skip un-coercible objects
-                    continue
-
-            if not rows:
-                raise TypeError("annotate_change_flags_arrow: expected list[dict] or pyarrow.Table-compatible objects")
-            table = pa.Table.from_pylist(rows)
-    elif not isinstance(table, pa.Table):
-        raise TypeError("annotate_change_flags_arrow: expected pyarrow.Table or list[dict]")
-
-    cols = set(table.column_names)
-    required = {domain_col, ns_col, a_col, mx_regdom_col, status_col}
-    missing = required - cols
-    if missing:
-        raise ValueError(f"annotate_change_flags_arrow: missing columns: {sorted(missing)}")
-    
-    # Ensure mx_ips_col exists, defaulting to empty if missing in input table
-    if mx_ips_col not in cols:
-         table = table.append_column(mx_ips_col, pa.array([""] * table.num_rows, type=pa.string()))
-
-    domains   = table[domain_col].to_pylist()
-    ns_vals   = table[ns_col].to_pylist()
-    a_vals    = table[a_col].to_pylist()
-    mx_vals   = table[mx_regdom_col].to_pylist()
-    statuses  = table[status_col].to_pylist()
-    regdoms   = table[registered_domain_col].to_pylist() if registered_domain_col in cols else [None] * len(domains)
-    mx_ips_vals = table[mx_ips_col].to_pylist()
-
+    # ── Evaluate each row ─────────────────────────────────────────
     needs_list: List[bool] = []
     react_list: List[bool] = []
-    deltas: List[Dict[str, str]] = []
-
+    deltas:     List[Dict] = []
     now_ts = int(time.time())
 
-    for domain, ns, a, mxreg, status, regdom, mx_ips in zip(domains, ns_vals, a_vals, mx_vals, statuses, regdoms, mx_ips_vals):
-        domain = (domain or "").lower()
-        ns = ns or ""
-        a  = a or ""
-        mxreg = (mxreg or "").lower()
-        status = status or ""
-        regdom = (regdom or "").lower() or domain
-        mx_ips = mx_ips or ""
+    for domain, row in zip(domains, rows):
+        status    = str(row.get(status_col) or "")
+        ns_str    = str(row.get(ns_col)         or "")
+        a_str     = str(row.get(a_col)          or "")
+        mx_regdom = str(row.get(mx_regdom_col)  or "").lower()
+        reg_domain = str(row.get(registered_domain_col) or "").lower() or domain
+        mx_ips    = str(row.get(mx_ips_col)     or "")
 
-        needs, reactivated, new = _row_needs_enrich(
-            kv=kv,
-            domain=domain,
-            ns=ns,
-            a=a,
-            mx_regdom=mxreg,
+        # Prefer pre-split list columns; fall back to parsing pipe-joined strings
+        ns    = row.get(ns_list_col)    or _to_list(ns_str)
+        a     = row.get(a_list_col)     or _to_list(a_str)
+        mx    = row.get(mx_list_col)    or _to_list(mx_regdom)
+        cname = row.get(cname_list_col) or []
+        ptr   = row.get(ptr_list_col)   or []
+
+        # Ensure sorted lists
+        ns = sorted(_to_list(ns) if not isinstance(ns, list) else ns)
+        a  = sorted(_to_list(a)  if not isinstance(a,  list) else a)
+        mx = sorted(_to_list(mx) if not isinstance(mx, list) else mx)
+
+        prev = prev_map.get(domain)
+
+        needs, reactivated, new_sig, changed = _row_needs_enrich(
+            prev=prev, domain=domain,
+            ns=ns, a=a, mx=mx, cname=cname, ptr=ptr,
             status=status,
-            registered_domain=regdom,
-            mx_ips=mx_ips,
+            ns_str=ns_str, a_str=a_str, mx_regdom=mx_regdom,
+            reg_domain=reg_domain, mx_ips=mx_ips,
         )
+
         needs_list.append(needs)
         react_list.append(reactivated)
 
-        # Only emit delta when something actually changed (or it's new/reactivated)
         if needs:
-            is_active_now = (str(status).upper() != "NXDOMAIN")
+            is_active = str(status).upper() != "NXDOMAIN"
             deltas.append({
-                "domain":        domain,
-                "is_active":     "true" if is_active_now else "false",
-                "last_seen_ts":  str(now_ts),
-                "dns_sig":       (new.decode("ascii", "ignore") if isinstance(new, (bytes, bytearray)) else str(new)),
-                "mx_regdom":     mxreg,
-                "mx_ips":        mx_ips,
+                "domain":           domain,
+                "is_active":        "true" if is_active else "false",
+                "last_seen_ts":     str(now_ts),
+                "dns_sig":          new_sig.decode("ascii", "ignore"),
+                "ns":               _jdump(ns),
+                "a":                _jdump(a),
+                "mx":               _jdump(mx),
+                "cname":            _jdump(cname),
+                "ptr":              _jdump(ptr),
+                "mx_regdom":        mx_regdom,
+                "mx_ips":           mx_ips,
+                "changed_records":  _jdump(changed),  # [] = brand new domain
             })
 
+    # ── Build annotated Arrow table ───────────────────────────────
+    try:
+        base_table = pa.Table.from_pylist(rows)
+    except Exception:
+        base_table = pa.table({domain_col: pa.array(domains, type=pa.string())})
+
+    col_names = set(base_table.column_names)
     needs_arr = pa.array(needs_list, type=pa.bool_())
     react_arr = pa.array(react_list, type=pa.bool_())
 
-    if "needs_enrich" in cols:
-        table = table.set_column(table.schema.get_field_index("needs_enrich"), "needs_enrich", needs_arr)
+    if "needs_enrich" in col_names:
+        base_table = base_table.set_column(
+            base_table.schema.get_field_index("needs_enrich"), "needs_enrich", needs_arr)
     else:
-        table = table.append_column("needs_enrich", needs_arr)
+        base_table = base_table.append_column("needs_enrich", needs_arr)
 
-    if "reactivated" in cols:
-        table = table.set_column(table.schema.get_field_index("reactivated"), "reactivated", react_arr)
+    if "reactivated" in col_names:
+        base_table = base_table.set_column(
+            base_table.schema.get_field_index("reactivated"), "reactivated", react_arr)
     else:
-        table = table.append_column("reactivated", react_arr)
+        base_table = base_table.append_column("reactivated", react_arr)
 
-    return table, deltas
+    return base_table, deltas
 
 
-# --- Delta writer -------------------------------------------------------------
-def write_activity_delta_csv(deltas: List[Dict[str, str]], out_path: str) -> None:
+# ── Delta writer ──────────────────────────────────────────────────────────────
+
+def write_activity_delta_csv(deltas: List[Dict], out_path: str) -> None:
     """
-    Append (create if missing) CSV with:
-      domain,is_active,last_seen_ts,dns_sig,mx_regdom,mx_ips
+    Append-write delta CSV (creates file + header on first write).
+    v2 rows carry full record lists; v1 consumers that only read
+    domain/is_active/last_seen_ts/dns_sig/mx_regdom/mx_ips still work fine
+    because those columns are still present.
     """
     if not deltas:
         return
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     exists = os.path.exists(out_path)
     with open(out_path, "a", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["domain","is_active","last_seen_ts","dns_sig","mx_regdom","mx_ips"])
+        w = csv.DictWriter(fh, fieldnames=DELTA_FIELDS, extrasaction="ignore")
         if not exists:
             w.writeheader()
-        for row in deltas:
-            w.writerow(row)
+        w.writerows(deltas)
