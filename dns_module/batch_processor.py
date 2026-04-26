@@ -18,7 +18,7 @@ from .dns_records import DNSRecord
 from .dns_fetcher import fetch_batch, DEFAULT_BATCH_WORKERS
 from .dns_utils import ip_to_int
 from kv.lmdb_store import LMDBActivity
-from .change_tracker import annotate_change_flags_arrow, write_activity_delta_csv
+from .change_tracker import annotate_change_flags_arrow, write_activity_delta_parquet
 
 from .logger import get_child_logger
 log = get_child_logger("batch_processor")
