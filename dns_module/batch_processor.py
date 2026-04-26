@@ -883,8 +883,8 @@ class BatchProcessor:
         # kv is now closed — do not reference it again
 
         # Emit deltas for the master aggregator
-        delta_path = str(NFS_BASE / "deltas" / f"delta_{self.file_key}.csv")
-        write_activity_delta_csv(deltas, delta_path)
+        delta_path = str(NFS_BASE / "deltas" / f"delta_{self.file_key}.parquet")
+        write_activity_delta_parquet(deltas, delta_path)
 
         # Step 4: Write initial retries snapshot
         if retries:

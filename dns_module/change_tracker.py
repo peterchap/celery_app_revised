@@ -268,19 +268,29 @@ def annotate_change_flags_arrow(
 
 # ── Delta writer ──────────────────────────────────────────────────────────────
 
-def write_activity_delta_csv(deltas: List[Dict], out_path: str) -> None:
-    """
-    Append-write delta CSV (creates file + header on first write).
-    v2 rows carry full record lists; v1 consumers that only read
-    domain/is_active/last_seen_ts/dns_sig/mx_regdom/mx_ips still work fine
-    because those columns are still present.
-    """
+def write_activity_delta_parquet(deltas: List[Dict], out_path: str) -> None:
     if not deltas:
         return
+    
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    exists = os.path.exists(out_path)
-    with open(out_path, "a", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=DELTA_FIELDS, extrasaction="ignore")
-        if not exists:
-            w.writeheader()
-        w.writerows(deltas)
+    
+    # Deserialise JSON strings back to native lists
+    rows = []
+    for d in deltas:
+        rows.append({
+            "domain":          d["domain"],
+            "is_active":       d["is_active"] == "true",
+            "last_seen_ts":    int(d["last_seen_ts"]),
+            "dns_sig":         d["dns_sig"],
+            "ns":              json.loads(d["ns"]),
+            "a":               json.loads(d["a"]),
+            "mx":              json.loads(d["mx"]),
+            "cname":           json.loads(d["cname"]),
+            "ptr":             json.loads(d["ptr"]),
+            "mx_regdom":       d["mx_regdom"],
+            "mx_ips":          d["mx_ips"],
+            "changed_records": json.loads(d["changed_records"]),
+        })
+    
+    table = pa.Table.from_pylist(rows, schema=DELTA_SCHEMA)
+    pq.write_table(table, out_path, compression="snappy")
