@@ -8,6 +8,7 @@ import csv
 from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from kv.lmdb_store import LMDBActivity
 
