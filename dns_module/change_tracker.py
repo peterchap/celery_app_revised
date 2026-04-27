@@ -292,5 +292,5 @@ def write_activity_delta_parquet(deltas: List[Dict], out_path: str) -> None:
             "changed_records": json.loads(d["changed_records"]),
         })
     
-    table = pa.Table.from_pylist(rows, schema=DELTA_SCHEMA)
+    table = pa.Table.from_pylist(rows)
     pq.write_table(table, out_path, compression="snappy")
