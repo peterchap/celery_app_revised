@@ -111,3 +111,48 @@ async def fetch_tlsrpt_rua(regdom: str, lookup: Any) -> str:
         return ""
     m = TLSRPT_RE.search(raw)
     return m.group(1).strip() if m else raw
+
+async def fetch_mta_sts_policy_http(
+    regdom: str,
+    http_timeout: float = 2.5,
+) -> Dict[str, Optional[Any]]:
+    """
+    Fetch + parse https://mta-sts.<regdom>/.well-known/mta-sts.txt only.
+
+    Standalone variant of the policy fetch inside detect_mta_sts, with no DNS
+    `lookup` dependency — for the batch path, which already holds the _mta-sts
+    TXT record and only needs the HTTPS policy body (mode / max_age). Call it
+    ONLY when the TXT exists (<1% of domains), so the single bounded HTTPS GET
+    never weighs on corpus throughput.
+
+    Returns {"mode": str or "", "max_age": int or None, "policy_text": str or None}.
+    """
+    mode = ""
+    max_age = None
+    policy_text = None
+    if not regdom:
+        return {"mode": mode, "max_age": max_age, "policy_text": policy_text}
+    url = f"https://mta-sts.{regdom}/.well-known/mta-sts.txt"
+    try:
+        timeout = aiohttp.ClientTimeout(total=http_timeout)
+        # ThreadedResolver = OS getaddrinfo (local Unbound on the slaves). The
+        # default aiodns/c-ares resolver fails on some hosts ("Could not contact
+        # DNS servers") and would silently blank mta_sts_mode.
+        conn = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver(), ssl=False)
+        async with aiohttp.ClientSession(timeout=timeout, connector=conn) as s:
+            async with s.get(url, allow_redirects=True) as r:
+                if r.status == 200:
+                    txt = await r.text()
+                    policy_text = txt
+                    m_mode = MTASTS_MODE_RE.search(txt)
+                    if m_mode:
+                        mode = m_mode.group("mode").strip().lower()
+                    m_max = MTASTS_MAXAGE_RE.search(txt)
+                    if m_max:
+                        try:
+                            max_age = int(m_max.group("max"))
+                        except Exception:
+                            max_age = None
+    except Exception:
+        policy_text = None
+    return {"mode": mode, "max_age": max_age, "policy_text": policy_text}

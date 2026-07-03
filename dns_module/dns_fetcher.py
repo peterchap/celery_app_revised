@@ -3,6 +3,7 @@ import asyncio
 import datetime
 import inspect
 import os
+import re
 import ipaddress
 from .logger import get_child_logger
 from typing import Optional, List, Any, Dict, cast, Iterable, Tuple
@@ -10,7 +11,7 @@ from dotenv import load_dotenv
 from .dns_records import DNSRecords, DNSRecord
 from . import dns_lookup
 from .probes import probe_https_cert, probe_smtp_starttls_cert, probe_security_txt
-from .policy import detect_mta_sts, fetch_tlsrpt_rua
+from .policy import detect_mta_sts, fetch_tlsrpt_rua, fetch_mta_sts_policy_http
 from .dns_utils import (
     to_ascii_hostname, reg_domain, ip_to_int,
     parse_smtp_banner, infer_mbp_from_banner,
@@ -816,6 +817,84 @@ async def fetch_domain(
             if srv_ttl_map:
                 record.meta['srv_ttl'] = srv_ttl_map
 
+        # Phase 3.8: Email-auth & hygiene records — fetch EVERYTHING available for
+        # the domain. These live on dedicated subdomains / rrtypes and were never
+        # queried by the batch path, which is why spf/dmarc/bimi/mta_sts/tlsrpt/
+        # dnssec were empty corpus-wide in bronze. Values go into record.records so
+        # the expanded-row flattener picks them up; failures never fail the row.
+        # Cost: 5 concurrent UDP lookups against the local recursor per domain.
+        try:
+            registered_auth = reg_domain(domain) or domain
+        except Exception:
+            registered_auth = domain
+        # SPF lives in the apex TXT we already fetched — no extra query.
+        try:
+            _txts = record.records.get('txt') or []
+            _spf = next((str(t) for t in _txts if 'v=spf1' in str(t).lower()), "")
+            if _spf:
+                record.records['spf'] = _spf
+        except Exception:
+            pass
+        try:
+            auth_results = await asyncio.gather(
+                dns_lookup.lookup_txt(f"_dmarc.{registered_auth}", resolver, semaphore),
+                dns_lookup.lookup_txt(f"_mta-sts.{registered_auth}", resolver, semaphore),
+                dns_lookup.lookup_txt(f"_smtp._tls.{registered_auth}", resolver, semaphore),
+                dns_lookup.lookup_txt(f"default._bimi.{registered_auth}", resolver, semaphore),
+                dns_lookup.perform_lookup('DNSKEY', registered_auth, resolver, semaphore, False),
+                return_exceptions=True,
+            )
+
+            def _first_txt(res, marker):
+                if isinstance(res, BaseException):
+                    return ""
+                if not (isinstance(res, (tuple, list)) and len(res) >= 2):
+                    return ""
+                rcode, answers = res[0], res[1]
+                if rcode != 'NOERROR' or not answers:
+                    return ""
+                return next((str(t) for t in answers if marker in str(t).lower()), "")
+
+            dmarc_v = _first_txt(auth_results[0], "v=dmarc")
+            if dmarc_v:
+                record.records['dmarc'] = dmarc_v
+            sts_v = _first_txt(auth_results[1], "v=stsv1")
+            if sts_v:
+                record.records['has_mta_sts'] = True
+                record.records['mta_sts_txt'] = sts_v
+                try:
+                    m_id = re.search(r'id\s*=\s*([^;\s]+)', sts_v)
+                    if m_id:
+                        record.records['mta_sts_id'] = m_id.group(1)
+                except Exception:
+                    pass
+                # Policy fetch (mode/max_age) ONLY when the TXT exists — a single
+                # bounded HTTPS GET on <1% of domains, so no throughput cost. The
+                # heavier TCP probes (certs/banners/security.txt) stay gated.
+                try:
+                    pol = await fetch_mta_sts_policy_http(registered_auth)
+                    if pol.get("mode"):
+                        record.records['mta_sts_mode'] = pol["mode"]
+                    if pol.get("max_age") is not None:
+                        record.records['mta_sts_max_age'] = pol["max_age"]
+                except Exception:
+                    pass
+            tlsrpt_v = _first_txt(auth_results[2], "v=tlsrptv1")
+            if tlsrpt_v:
+                try:
+                    m_rua = re.search(r'rua\s*=\s*([^;\s]+)', tlsrpt_v)
+                    record.records['tlsrpt_rua'] = m_rua.group(1) if m_rua else tlsrpt_v
+                except Exception:
+                    record.records['tlsrpt_rua'] = tlsrpt_v
+            bimi_v = _first_txt(auth_results[3], "v=bimi")
+            if bimi_v:
+                record.records['bimi'] = bimi_v
+            dk = auth_results[4]
+            if not isinstance(dk, BaseException) and isinstance(dk, (tuple, list)) and len(dk) >= 2:
+                record.records['dnssec'] = bool(dk[0] == 'NOERROR' and dk[1])
+        except Exception:
+            pass
+
         # Phase 4: PTR lookups prefer LMDB cache; optionally skip network
         all_ips = set()
         for ip in a_answers:
@@ -1335,7 +1414,8 @@ class DNSFetcher:
             dmarc_txt = ""
             bimi_txt = ""
             try:
-                # expand may have txt entries for apex; if not, fall back to lookup helpers
+                # SPF lives in APEX TXT: use the expanded txt entries when present,
+                # else query the apex.
                 txts = expanded.get("txt") or []
                 if txts:
                     # normalize bytes/objects to strings
@@ -1345,24 +1425,24 @@ class DNSFetcher:
                             txt_norm.append(t.decode(errors="ignore"))
                         else:
                             txt_norm.append(str(t))
-                    # find spf/dmarc/bimi among returned texts
                     spf_txt = next((t for t in txt_norm if "v=spf1" in t.lower()), "")
-                    dmarc_txt = next((t for t in txt_norm if t.lower().startswith("v=dmarc")), "")
-                    bimi_txt = next((t for t in txt_norm if "v=bimi" in t.lower()), "")
                 else:
-                    # fallback queries
-                    try:
-                        dmarc_txt = next((t for t in (await self.lookup.resolve_txt_join(f"_dmarc.{registered}")) if "v=dmarc" in t.lower()), "")
-                    except Exception:
-                        dmarc_txt = ""
                     try:
                         spf_txt = next((t for t in (await self.lookup.resolve_txt_join(registered)) if "v=spf1" in t.lower()), "")
                     except Exception:
                         spf_txt = ""
-                    try:
-                        bimi_txt = next((t for t in (await self.lookup.resolve_txt_join(f"default._bimi.{registered}")) if "v=bimi" in t.lower()), "")
-                    except Exception:
-                        bimi_txt = ""
+                # DMARC and BIMI NEVER live at the apex — they are TXT records on the
+                # _dmarc. / default._bimi. subdomains, so ALWAYS query those. (The old
+                # code only queried them when the apex had no TXT at all, which skipped
+                # DMARC for every domain that publishes SPF — ~99.5% of the corpus.)
+                try:
+                    dmarc_txt = next((t for t in (await self.lookup.resolve_txt_join(f"_dmarc.{registered}")) if "v=dmarc" in t.lower()), "")
+                except Exception:
+                    dmarc_txt = ""
+                try:
+                    bimi_txt = next((t for t in (await self.lookup.resolve_txt_join(f"default._bimi.{registered}")) if "v=bimi" in t.lower()), "")
+                except Exception:
+                    bimi_txt = ""
             except Exception:
                 spf_txt = dmarc_txt = bimi_txt = ""
 
