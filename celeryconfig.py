@@ -58,6 +58,14 @@ task_reject_on_worker_lost = True
 worker_prefetch_multiplier = 1
 
 # ============================================================
+# Monitoring — emit task events so Flower's task view shows the
+# fleet's work (equivalent to starting workers with -E)
+# ============================================================
+
+worker_send_task_events = True
+task_send_sent_event    = True
+
+# ============================================================
 # Results
 # ============================================================
 
