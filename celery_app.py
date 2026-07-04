@@ -7,7 +7,7 @@ from kombu import Exchange, Queue
 
 BROKER_URL = os.getenv(
     "CELERY_BROKER_URL",
-    "pyamqp://admin:1Francis2@10.0.0.2:5672//",
+    "redis://:datazag@10.0.0.2:6379/0",
 )
 
 app = Celery("datazag", broker=BROKER_URL, include=["task"])

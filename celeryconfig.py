@@ -7,12 +7,12 @@ import os
 
 broker_url = os.getenv(
     "CELERY_BROKER_URL",
-    "pyamqp://admin:1Francis2@10.0.0.2:5672//"
+    "redis://:datazag@10.0.0.2:6379/0"
 )
 
 result_backend = os.getenv(
     "CELERY_RESULT_BACKEND",
-    "redis://:datazag10.0.0.2:6379/0"
+    "redis://:datazag@10.0.0.2:6379/0"
 )
 
 # ============================================================
@@ -27,6 +27,13 @@ redbeat_lock_timeout  = 60   # seconds — beat must check in within this window
 
 broker_heartbeat         = 10   # seconds — detect dead connections faster
 broker_connection_timeout = 30  # don't wait too long on a lost broker
+
+# With a Redis broker + task_acks_late, an unacked message is redelivered
+# to another worker after visibility_timeout (default 1h). Standard batches
+# routinely run 25min+ and can approach the time limits, so the default
+# caused duplicate processing. Must exceed the worst-case task duration.
+# Keep in sync with the master's celeryconfig.py.
+broker_transport_options = {"visibility_timeout": 43200}  # 12 hours
 
 # Serialisation
 # ============================================================

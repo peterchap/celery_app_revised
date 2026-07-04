@@ -9,6 +9,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from celery_app import app
 from dns_module.dns_application import DNSApplication
 
@@ -20,9 +22,10 @@ ROOT = Path("/mnt/shared")
 IN_PROGRESS_FOLDER = ROOT / "inprogress"
 PROCESSED_FOLDER = ROOT / "processed"
 FAILED_FOLDER = ROOT / "failed"
+RETRY_FOLDER = ROOT / "retries"
 LOG_DIR = ROOT / "logs"
 
-for p in [IN_PROGRESS_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER, LOG_DIR]:
+for p in [IN_PROGRESS_FOLDER, PROCESSED_FOLDER, FAILED_FOLDER, RETRY_FOLDER, LOG_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
 # ============================================================
@@ -73,6 +76,16 @@ def move_to_failed(path: Path) -> Path:
     return dst
 
 
+def move_to_retries(path: Path) -> Path:
+    """Hand the file back to the master's retry sweep, which re-queues it
+    with a retry_N_ prefix and moves it to failed/ after 4 attempts.
+    No sidecar JSON here — the sweep enqueues every file in the folder,
+    so a .json would itself be sent round the pipeline."""
+    dst = RETRY_FOLDER / path.name
+    shutil.move(str(path), str(dst))
+    return dst
+
+
 async def run_dns_task(dns_app_instance: DNSApplication, file_key: str) -> None:
     # keep positional call to remain compatible with your existing DNSApplication
     await dns_app_instance.run_dns(file_key)
@@ -82,7 +95,9 @@ async def run_dns_task(dns_app_instance: DNSApplication, file_key: str) -> None:
 # Celery task
 # ============================================================
 
-@app.task(name="task.process_file", acks_late=True, soft_time_limit=3600, time_limit=4200)
+# Limits must fit the worst-case batch (observed up to ~70min in production)
+# and stay below the 12h broker visibility_timeout in celeryconfig.py.
+@app.task(name="task.process_file", acks_late=True, soft_time_limit=7200, time_limit=7500)
 def process_file(file: str) -> dict[str, Any]:
     """
     Expected file examples:
@@ -133,20 +148,23 @@ def process_file(file: str) -> dict[str, Any]:
             "message": msg,
         }
 
+    except SoftTimeLimitExceeded:
+        log.error("Task timed out for file=%s workload=%s", file, workload_class)
+        if input_path.exists():
+            retry_path = move_to_retries(input_path)
+            log.error("Moved timed-out file to %s for re-queue", retry_path)
+        raise
+
     except Exception as e:
         log.exception("Task failed for file=%s error=%s", file, e)
 
         if input_path.exists():
-            failed_path = move_to_failed(input_path)
-            payload = {
-                "status": "failed",
-                "file": filename,
-                "relative_path": file,
-                "workload_class": workload_class,
-                "error": str(e),
-            }
-            write_sidecar_json(failed_path, payload)
-            log.error("Moved failed file to %s", failed_path)
+            retry_path = move_to_retries(input_path)
+            log.error(
+                "Moved failed file to %s for re-queue (workload=%s error=%s) — "
+                "goes to failed/ after 4 attempts",
+                retry_path, workload_class, e,
+            )
 
         raise
 
@@ -159,7 +177,7 @@ def process_file_priority(file: str) -> dict[str, Any]:
     return process_file(file)
 
 
-@app.task(name="task.process_file_new_domain", acks_late=True, soft_time_limit=3600, time_limit=4200)
+@app.task(name="task.process_file_new_domain", acks_late=True, soft_time_limit=7200, time_limit=7500)
 def process_file_new_domain(file: str) -> dict[str, Any]:
     """
     First-seen domains — same processing as standard
@@ -168,7 +186,7 @@ def process_file_new_domain(file: str) -> dict[str, Any]:
     return process_file(file)
 
 
-@app.task(name="task.process_file_retry", acks_late=True, soft_time_limit=3600, time_limit=4200)
+@app.task(name="task.process_file_retry", acks_late=True, soft_time_limit=7200, time_limit=7500)
 def process_file_retry(file: str) -> dict[str, Any]:
     """
     Previously failed files — same processing pipeline,
