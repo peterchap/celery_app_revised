@@ -316,7 +316,11 @@ def default_semaphore(limit: int = DEFAULT_SEMAPHORE_LIMIT) -> asyncio.Semaphore
 def _get_executor() -> ThreadPoolExecutor:
     global _executor
     if _executor is None:
-        _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="lmdb")
+        try:
+            n_threads = max(1, int(os.getenv("DNS_LMDB_EXECUTOR_THREADS", "16")))
+        except Exception:
+            n_threads = 16
+        _executor = ThreadPoolExecutor(max_workers=n_threads, thread_name_prefix="lmdb")
         try:
             logger.info("Created thread pool executor for LMDB operations")
         except Exception:
@@ -511,16 +515,26 @@ def start_lmdb_writer() -> Optional[asyncio.Task]:
 # --------------------------------------------------------------------
 # LMDB reads — semaphore-gated to prevent MDB_CURSOR_FULL under async load
 # --------------------------------------------------------------------
+def _lmdb_read_concurrency() -> int:
+    # Reads here are plain txn.get() (no cursors), so the historical
+    # MDB_CURSOR_FULL guard of 10 was far tighter than needed and gated
+    # cache hits behind a 10-wide queue while ~500 lookups ran. Lower
+    # DNS_LMDB_READ_CONCURRENCY if cursor errors ever reappear.
+    try:
+        return max(1, int(os.getenv("DNS_LMDB_READ_CONCURRENCY", "64")))
+    except Exception:
+        return 64
+
 def _get_lmdb_semaphore() -> asyncio.Semaphore:
     global _lmdb_read_semaphore
     if _lmdb_read_semaphore is None:
-        _lmdb_read_semaphore = asyncio.Semaphore(10)
+        _lmdb_read_semaphore = asyncio.Semaphore(_lmdb_read_concurrency())
     return _lmdb_read_semaphore
 
 def _get_lmdb_ptr_semaphore() -> asyncio.Semaphore:
     global _lmdb_ptr_read_semaphore
     if _lmdb_ptr_read_semaphore is None:
-        _lmdb_ptr_read_semaphore = asyncio.Semaphore(10)
+        _lmdb_ptr_read_semaphore = asyncio.Semaphore(_lmdb_read_concurrency())
     return _lmdb_ptr_read_semaphore
 
 async def _read_from_lmdb(key: str) -> Optional[Tuple[str, List[str], int, float]]:

@@ -167,135 +167,83 @@ class DNSApplication:
     def _rate_for_tld(self, tld: str) -> int:
         return self.tld_rate_limits.get(tld, self.tld_rate_limits.get("rest", CONFIG.global_qps))
 
-    async def _process_interleaved(
+    def _make_batch_processor(self, file_key: str, semaphore: asyncio.Semaphore, workers: int) -> BatchProcessor:
+        """Shared BatchProcessor factory — semaphore/workers arrive already
+        capped by the caller (ChunkedTLDProcessor applies CONFIG limits)."""
+        is_prio = "prio_" in self.file_key.lower()
+        return BatchProcessor(
+            file_key=file_key,
+            output_dir=self.output_directory,
+            retry_dir=self.retry_directory,
+            workers=workers,
+            semaphore=semaphore,
+            logger=app_logger,
+            lmdb_path=str(self.lmdb_path) if getattr(self, "lmdb_path", None) else None,
+            lookups_db_path=os.getenv("LOOKUPS_DB_PATH"),
+            flight_server_url=os.getenv("FLIGHT_SERVER_URL"),
+            retry_limit=0 if is_prio else 1,
+            source_feed=getattr(self, "source_feed", "zone_file")
+        )
+
+    async def _process_concurrent(
         self,
         groups: Dict[str, List[str]],
         safe_key: str,
         chunked_processor: ChunkedTLDProcessor
     ) -> List:
         """
-        Process TLDs in interleaved manner to eliminate idle cooldowns.
+        Run every TLD group as its own task, all groups concurrently.
 
-        Schedule:
-        1. .com chunk 1 (warmup)
-        2. .uk (full)
-        3. .de (full)
-        4. .com chunk 2
-        5. .xyz (full)
-        6. .rest (full)
-        7. .com chunk 3 (if exists)
-        8. .net (full)
+        Rate safety is unchanged: within a group, chunks still run
+        sequentially at the group's capped QPS/concurrency (including the
+        first-chunk warmup), so no single registrar sees a higher rate than
+        before. What changes is that groups for *different* registrars now
+        overlap instead of idling behind each other — previously a .uk group
+        capped at 12 QPS would hold up .com/.rest entirely.
+
+        Aggregate concurrency across groups is bounded by the sum of the
+        per-group caps and by the global QPS token bucket in dns_lookup.
         """
         app_logger.info("=" * 70)
-        app_logger.info("INTERLEAVED PROCESSING (Eliminating Idle Cooldowns)")
+        app_logger.info("CONCURRENT TLD PROCESSING (groups overlap; per-TLD caps unchanged)")
         app_logger.info("=" * 70)
+        for tld, domains in groups.items():
+            app_logger.info(f"  .{tld}: {len(domains):,} domains")
+
+        group_tasks = {
+            tld: asyncio.create_task(
+                chunked_processor.process_tld_chunked(
+                    tld=tld,
+                    domains=domains,
+                    batch_processor_factory=self._make_batch_processor,
+                    file_key=safe_key,
+                )
+            )
+            for tld, domains in groups.items()
+        }
+
+        start = asyncio.get_event_loop().time()
+        gathered = await asyncio.gather(*group_tasks.values(), return_exceptions=True)
+        elapsed = asyncio.get_event_loop().time() - start
 
         all_results = []
-
-        # Prepare .com chunks
-        com_chunks = []
-        if 'com' in groups:
-            com_config = chunked_processor.get_config('com')
-            com_chunks = chunked_processor.chunk_domains(
-                groups['com'],
-                com_config['chunk_size']
-            )
-
-        # Build processing order
-        processing_order = []
-
-        # 1. .com chunk 1
-        if com_chunks:
-            processing_order.append(('com', 'chunk', 1, com_chunks[0]))
-
-        # 1.5. High risk domains (process early as priority!)
-        if 'highrisk' in groups:
-            processing_order.append(('highrisk', 'full', 0, groups['highrisk']))
-
-        # 2-3. Small TLDs (uk, de)
-        for tld in ['uk', 'co.uk', 'de']:
-            if tld in groups:
-                processing_order.append((tld, 'full', 0, groups[tld]))
-
-        # 4. .com chunk 2
-        if len(com_chunks) > 1:
-            processing_order.append(('com', 'chunk', 2, com_chunks[1]))
-
-        # 5. .xyz
-        if 'xyz' in groups:
-            processing_order.append(('xyz', 'full', 0, groups['xyz']))
-
-        # 6. .rest (largest, good cooldown maker)
-        if 'rest' in groups:
-            processing_order.append(('rest', 'full', 0, groups['rest']))
-
-        # 7. .com chunk 3
-        if len(com_chunks) > 2:
-            processing_order.append(('com', 'chunk', 3, com_chunks[2]))
-
-        # 8. .net
-        if 'net' in groups:
-            processing_order.append(('net', 'full', 0, groups['net']))
-
-        # Log schedule
-        app_logger.info(f"\nProcessing {len(processing_order)} tasks:\n")
-        for idx, (tld, task_type, chunk_num, domains) in enumerate(processing_order, 1):
-            if task_type == 'chunk':
-                app_logger.info(f"  {idx}. .{tld} chunk {chunk_num} ({len(domains):,} domains)")
+        failed = []
+        for tld, res in zip(group_tasks.keys(), gathered):
+            if isinstance(res, BaseException):
+                failed.append(tld)
+                app_logger.error(f"TLD group .{tld} failed: {res!r}")
             else:
-                app_logger.info(f"  {idx}. .{tld} full batch ({len(domains):,} domains)")
-        app_logger.info("")
-
-        # Process schedule
-        for idx, (tld, task_type, chunk_num, domains) in enumerate(processing_order, 1):
-            app_logger.info(f"\n{'='*70}")
-            if task_type == 'chunk':
-                app_logger.info(f"Task {idx}: .{tld} chunk {chunk_num}")
-            else:
-                app_logger.info(f"Task {idx}: .{tld} (full batch)")
-            app_logger.info(f"{'='*70}")
-
-            # Get config for this TLD
-            config = chunked_processor.get_config(tld)
-            chunk_qps = config['qps']
-            # Cap by app-level limits
-            effective_qps = CONFIG.effective_qps_for_tld(tld, chunk_qps)
-            effective_concurrency = CONFIG.effective_concurrency_for_tld(tld, effective_qps)
-
-            # Create BatchProcessor
-            def create_bp(file_key, semaphore, workers):
-                is_prio = "prio_" in self.file_key.lower()
-                return BatchProcessor(
-                    file_key=file_key,
-                    output_dir=self.output_directory,
-                    retry_dir=self.retry_directory,
-                    workers=workers,
-                    semaphore=semaphore,
-                    logger=app_logger,
-                    lmdb_path=str(self.lmdb_path) if getattr(self, "lmdb_path", None) else None,
-                    lookups_db_path=os.getenv("LOOKUPS_DB_PATH"),
-                    flight_server_url=os.getenv("FLIGHT_SERVER_URL"),
-                    retry_limit=0 if is_prio else 1,
-                    source_feed=getattr(self, "source_feed", "zone_file")
-                )
-
-            bp = create_bp(
-                file_key=f"{safe_key}_{tld}_{'chunk'+str(chunk_num) if task_type=='chunk' else 'full'}",
-                semaphore=asyncio.Semaphore(effective_concurrency),
-                workers=effective_concurrency
-            )
-
-            # Process
-            start = asyncio.get_event_loop().time()
-            result = await bp.process(domains)
-            elapsed = asyncio.get_event_loop().time() - start
-
-            app_logger.info(f"Completed in {elapsed:.1f}s")
-            all_results.append(result)
+                all_results.extend(res)
 
         app_logger.info("\n" + "=" * 70)
-        app_logger.info("INTERLEAVED PROCESSING COMPLETE")
+        app_logger.info(
+            f"CONCURRENT PROCESSING COMPLETE in {elapsed/60:.1f} min "
+            f"({len(groups) - len(failed)}/{len(groups)} groups ok)"
+        )
         app_logger.info("=" * 70)
+
+        if failed and len(failed) == len(groups):
+            raise RuntimeError(f"All TLD groups failed: {failed}")
 
         return all_results
 
@@ -369,10 +317,14 @@ class DNSApplication:
             app_logger.info("Using chunked TLD processing")
 
             chunked_processor = ChunkedTLDProcessor()
-            use_interleaved = os.getenv("ENABLE_INTERLEAVED", "true").lower() == "true"
+            # ENABLE_INTERLEAVED kept as a fallback name so existing fleet
+            # .env files keep working; ENABLE_CONCURRENT_TLD wins if set.
+            use_concurrent = os.getenv(
+                "ENABLE_CONCURRENT_TLD", os.getenv("ENABLE_INTERLEAVED", "true")
+            ).lower() == "true"
 
-            if use_interleaved:
-                all_results = await self._process_interleaved(groups, safe_key, chunked_processor)
+            if use_concurrent:
+                all_results = await self._process_concurrent(groups, safe_key, chunked_processor)
             else:
                 # Sequential estimate + processing
                 app_logger.info("Using sequential processing")
@@ -407,35 +359,12 @@ class DNSApplication:
 
                     group = groups[tld]
 
-                    # Factory function to create BatchProcessor for each chunk.
-                    # The processor receives a suggested 'workers', which equals the chunk_qps
-                    # from ChunkedTLDProcessor (including warmup). We cap it using CONFIG.
-                    def create_batch_processor(file_key, semaphore, workers):
-                        # workers is the suggested chunk_qps from the caller; cap it.
-                        suggested_qps = int(workers or 1)
-                        cap = CONFIG.effective_concurrency_for_tld(tld, suggested_qps)
-                        sem_capped = asyncio.Semaphore(cap)
-                        is_prio = "prio_" in self.file_key.lower()
-
-                        return BatchProcessor(
-                            file_key=file_key,
-                            output_dir=self.output_directory,
-                            retry_dir=self.retry_directory,
-                            workers=cap,
-                            semaphore=sem_capped,
-                            logger=app_logger,
-                            lmdb_path=str(self.lmdb_path) if getattr(self, "lmdb_path", None) else None,
-                            lookups_db_path=os.getenv("LOOKUPS_DB_PATH"),
-                            flight_server_url=os.getenv("FLIGHT_SERVER_URL"),
-                            retry_limit=0 if is_prio else 1,
-                            source_feed=getattr(self, "source_feed", "zone_file")
-                        )
-
-                    # Process TLD in chunks
+                    # Process TLD in chunks — ChunkedTLDProcessor already caps
+                    # semaphore/workers via CONFIG before calling the factory.
                     tld_results = await chunked_processor.process_tld_chunked(
                         tld=tld,
                         domains=group,
-                        batch_processor_factory=create_batch_processor,
+                        batch_processor_factory=self._make_batch_processor,
                         file_key=safe_key
                     )
 
@@ -497,4 +426,4 @@ class DNSApplication:
             results_path, retries_path = await bp.process(group_domains)
             app_logger.info("Completed TLD group {}: results={} retries={}", tld, results_path, retries_path)
         except Exception as e:
-            app_logger.error("TLD group task failed: %r\n%s", e, traceback.format_exc())(celeryapp)
+            app_logger.error("TLD group task failed: %r\n%s", e, traceback.format_exc())

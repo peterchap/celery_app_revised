@@ -871,22 +871,26 @@ class BatchProcessor:
         if not self.lmdb_path:
             raise RuntimeError("LMDB path not configured on BatchProcessor")
 
-        with LMDBActivity(str(self.lmdb_path), readonly=True) as kv:
-            change_table, deltas = annotate_change_flags_arrow(
-                signature_rows,
-                kv,
-                domain_col="domain",
-                ns_col="ns_raw",
-                a_col="a",
-                mx_regdom_col="mx_regdom_final",
-                status_col="status",
-                mx_ips_col="mx_ips",
-            )
-        # kv is now closed — do not reference it again
+        def _detect_changes():
+            # LMDB env is opened, used and closed entirely within this
+            # thread — nothing here touches the event loop.
+            with LMDBActivity(str(self.lmdb_path), readonly=True) as kv:
+                return annotate_change_flags_arrow(
+                    signature_rows,
+                    kv,
+                    domain_col="domain",
+                    ns_col="ns_raw",
+                    a_col="a",
+                    mx_regdom_col="mx_regdom_final",
+                    status_col="status",
+                    mx_ips_col="mx_ips",
+                )
+
+        change_table, deltas = await asyncio.to_thread(_detect_changes)
 
         # Emit deltas for the master aggregator
         delta_path = str(NFS_BASE / "deltas" / f"delta_{self.file_key}.parquet")
-        write_activity_delta_parquet(deltas, delta_path)
+        await asyncio.to_thread(write_activity_delta_parquet, deltas, delta_path)
 
         # Step 4: Write initial retries snapshot
         if retries:
@@ -960,7 +964,7 @@ class BatchProcessor:
             retries_path = self.retry_dir / f"{self.file_key}_retries.parquet"
             try:
                 retries_table = pa.Table.from_pylist(retry_rows, schema=get_dns_schema())
-                pq.write_table(retries_table, retries_path)
+                await asyncio.to_thread(pq.write_table, retries_table, retries_path)
                 self.log.info(f"Wrote {len(retry_rows)} retries to {retries_path}")
             except Exception as e:
                 self.log.error(f"Failed to write retries parquet: {e}", exc_info=True)

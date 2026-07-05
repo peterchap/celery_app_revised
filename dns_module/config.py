@@ -46,7 +46,11 @@ class DNSConfig:
     timeout_s: float = 4.0
     lifetime_s: float = 12.0
 
-    global_qps: int = 500
+    # Global token bucket charged per DNS query (cache hits bypass it).
+    # Each domain issues ~15-30 queries, so this bounds domain throughput
+    # at roughly global_qps / 20. Per-TLD caps below still bound what any
+    # single registrar sees regardless of this value.
+    global_qps: int = 2000
     semaphore_limit: int = 500
     workers_default: int = 64
 
