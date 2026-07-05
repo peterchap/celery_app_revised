@@ -360,9 +360,9 @@ async def fetch_domain(
             'a': a_rcode == 'NOERROR' and a_answers,
         }
 
-        # Log core rcodes to aid diagnosis
+        # Log core rcodes to aid diagnosis (debug — this is a per-domain hot path)
         try:
-            log.info("core rcodes for {}: ns={} soa={} a={}", domain, ns_rcode, soa_rcode, a_rcode)
+            log.debug("core rcodes for {}: ns={} soa={} a={}", domain, ns_rcode, soa_rcode, a_rcode)
         except Exception:
             pass
 
@@ -433,15 +433,9 @@ async def fetch_domain(
             except Exception:
                 record.records['soa'] = soa_answers
 
-            # Also fetch structured SOA for serial tracking
-            try:
-                r_s, soa_struct_list, _ = await dns_lookup.lookup_soa_struct(domain, resolver, semaphore)
-                if r_s == 'NOERROR' and soa_struct_list:
-                    record.meta['soa_struct'] = soa_struct_list[0]
-                    if 'serial' in soa_struct_list[0]:
-                        record.meta['soa_serial'] = soa_struct_list[0]['serial']
-            except Exception:
-                pass
+            # Structured SOA (serial etc.) is fetched once in the Phase 3
+            # gather below — the old second fetch here was redundant and its
+            # meta value was overwritten by the later one anyway.
         else:
             record.errors['SOA'] = soa_rcode
 
@@ -472,73 +466,107 @@ async def fetch_domain(
         record.meta['changed'] = str(any_changed)
         # Always fetch grouped records so outputs contain full DNS set
 
-        # Phase 3.5: Process NS Host IP
-        try:
+        # Shared helper: resolve a helper host's (NS/MX) A+AAAA from cache
+        # concurrently, with a single live A fallback on miss.
+        async def _host_ips_from_cache(host: str):
+            a_cached_r, aaaa_cached_r = await asyncio.gather(
+                dns_lookup.get_cached_result('A', host, only_positive=True),
+                dns_lookup.get_cached_result('AAAA', host, only_positive=True),
+                return_exceptions=True,
+            )
+            a_cached_r = None if isinstance(a_cached_r, BaseException) else a_cached_r
+            aaaa_cached_r = None if isinstance(aaaa_cached_r, BaseException) else aaaa_cached_r
+
+            a_ans: List[str] = []
+            a_ttl = None
+            a_live = False
+            if a_cached_r and a_cached_r[1]:
+                a_ans = [str(x) for x in a_cached_r[1]]
+                a_ttl = a_cached_r[2]
+            else:
+                try:
+                    r_a, ans_a, ttl_a = await dns_lookup.lookup_a(host, resolver, semaphore)
+                    if r_a == 'NOERROR' and ans_a:
+                        a_ans = [str(x) for x in ans_a]
+                        a_ttl = ttl_a
+                        a_live = True
+                        try:
+                            if dns_lookup.is_lmdb_readonly():
+                                try:
+                                    from kv.update_reporter import report_dns_update
+                                    report_dns_update('A', host, r_a, ans_a, ttl_a)
+                                except Exception:
+                                    pass
+                            else:
+                                await dns_lookup.check_changed_and_enqueue_update('A', host, r_a, ans_a, ttl_a)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            aaaa_ans: List[str] = []
+            aaaa_ttl = None
+            if aaaa_cached_r and aaaa_cached_r[1]:
+                aaaa_ans = [str(x) for x in aaaa_cached_r[1]]
+                aaaa_ttl = aaaa_cached_r[2]
+            return a_ans, a_ttl, a_live, aaaa_ans, aaaa_ttl
+
+        # NS host IP resolution — independent of the grouped lookups, so it
+        # runs inside the Phase 3 gather instead of serially before it.
+        async def _resolve_ns_host():
             ns_answers_list = record.records.get('ns', [])
-            if ns_answers_list:
-                first_ns = str(ns_answers_list[0]).rstrip('.')
-                record.records['ns_host_final'] = first_ns
-                record.records['ns_regdom_final'] = reg_domain(first_ns) or ''
+            if not ns_answers_list:
+                return
+            first_ns = str(ns_answers_list[0]).rstrip('.')
+            record.records['ns_host_final'] = first_ns
+            record.records['ns_regdom_final'] = reg_domain(first_ns) or ''
+            a_ans, _a_ttl, _a_live, aaaa_ans, _aaaa_ttl = await _host_ips_from_cache(first_ns)
+            if a_ans:
+                record.records['ns_host_a'] = a_ans
+            if aaaa_ans:
+                record.records['ns_host_aaaa'] = aaaa_ans
 
-                # Resolve NS host IPs via cache
-                try:
-                    ns_a_cached = await dns_lookup.get_cached_result('A', first_ns, only_positive=True)
-                except Exception:
-                    ns_a_cached = None
-                try:
-                    ns_aaaa_cached = await dns_lookup.get_cached_result('AAAA', first_ns, only_positive=True)
-                except Exception:
-                    ns_aaaa_cached = None
-
-                if ns_a_cached and ns_a_cached[1]:
-                    try:
-                        record.records['ns_host_a'] = [str(x) for x in ns_a_cached[1]]
-                    except Exception:
-                        record.records['ns_host_a'] = ns_a_cached[1]
-                if ns_aaaa_cached and ns_aaaa_cached[1]:
-                    try:
-                        record.records['ns_host_aaaa'] = [str(x) for x in ns_aaaa_cached[1]]
-                    except Exception:
-                        record.records['ns_host_aaaa'] = ns_aaaa_cached[1]
-
-                # Minimal live fallback for A on cache miss
-                if not record.records.get('ns_host_a'):
-                    try:
-                        r_ns_a, ans_ns_a, ttl_ns_a = await dns_lookup.lookup_a(first_ns, resolver, semaphore)
-                        if r_ns_a == 'NOERROR' and ans_ns_a:
-                            try:
-                                record.records['ns_host_a'] = [str(x) for x in ans_ns_a]
-                            except Exception:
-                                record.records['ns_host_a'] = ans_ns_a
-                            try:
-                                if dns_lookup.is_lmdb_readonly():
-                                    try:
-                                        from kv.update_reporter import report_dns_update
-                                        report_dns_update('A', first_ns, r_ns_a, ans_ns_a, ttl_ns_a)
-                                    except Exception:
-                                        pass
-                                else:
-                                    await dns_lookup.check_changed_and_enqueue_update('A', first_ns, r_ns_a, ans_ns_a, ttl_ns_a)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        # Phase 3: Fetch grouped records concurrently (AAAA, MX, TXT, CAA, NAPTR)
+        # Inputs needed by the gather that used to be computed later
         try:
-            logger.info(f"Starting Phase 3 lookups (AAAA, MX, TXT...) for {domain}")
+            registered_auth = reg_domain(domain) or domain
+        except Exception:
+            registered_auth = domain
+        try:
+            srv_mode = os.getenv('DNS_COLLECT_SRV', 'new_only').strip().lower()
+        except Exception:
+            srv_mode = 'new_only'
+        should_collect_srv = (srv_mode == 'always') or (srv_mode == 'new_only' and any_changed)
+        srv_services = ["_xmpp._tcp", "_sip._tcp"]
+
+        # Phase 3: everything that doesn't depend on another Phase 3 result
+        # runs in ONE gather — grouped records, structured SOA, email-auth,
+        # DNSSEC, NS-host IPs, and (when enabled) SRV. Previously these ran
+        # as four sequential await rounds per domain.
+        try:
+            logger.debug(f"Starting Phase 3 lookups (AAAA, MX, TXT...) for {domain}")
         except Exception:
             pass
 
         grouped_tasks = [
-            dns_lookup.lookup_aaaa(domain, resolver, semaphore),
-            dns_lookup.lookup_mx(domain, resolver, semaphore),
-            dns_lookup.lookup_txt(domain, resolver, semaphore),
-            dns_lookup.lookup_caa_struct(domain, resolver, semaphore),
-            dns_lookup.lookup_naptr_struct(domain, resolver, semaphore),
+            dns_lookup.lookup_aaaa(domain, resolver, semaphore),                          # 0
+            dns_lookup.lookup_mx(domain, resolver, semaphore),                            # 1
+            dns_lookup.lookup_txt(domain, resolver, semaphore),                           # 2
+            dns_lookup.lookup_caa_struct(domain, resolver, semaphore),                    # 3
+            dns_lookup.lookup_naptr_struct(domain, resolver, semaphore),                  # 4
+            dns_lookup.lookup_soa_struct(domain, resolver, semaphore),                    # 5
+            dns_lookup.lookup_txt(f"_dmarc.{registered_auth}", resolver, semaphore),      # 6
+            dns_lookup.lookup_txt(f"_mta-sts.{registered_auth}", resolver, semaphore),    # 7
+            dns_lookup.lookup_txt(f"_smtp._tls.{registered_auth}", resolver, semaphore),  # 8
+            dns_lookup.lookup_txt(f"default._bimi.{registered_auth}", resolver, semaphore),  # 9
+            dns_lookup.perform_lookup('DNSKEY', registered_auth, resolver, semaphore, False),  # 10
+            _resolve_ns_host(),                                                           # 11
         ]
+        _SRV_BASE = len(grouped_tasks)  # 12
+        if should_collect_srv:
+            grouped_tasks.extend(
+                dns_lookup.lookup_srv_struct(f"{svc}.{domain}", resolver, semaphore)
+                for svc in srv_services
+            )
 
         grouped_results = await asyncio.gather(*grouped_tasks, return_exceptions=True)
 
@@ -571,65 +599,28 @@ async def fetch_domain(
                     record.records['mx_regdom_final'] = reg_domain(host) or ''
                 except Exception:
                     pass
-                # Resolve MX host IPs via cache; fallback to live on miss
+                # Resolve MX host IPs via cache (A+AAAA concurrently); live A
+                # fallback (with persist/report) handled by the shared helper.
                 try:
                     mx_host = record.records.get('mx_host_final')
                 except Exception:
                     mx_host = None
                 if mx_host:
-                    try:
-                        mx_a_cached = await dns_lookup.get_cached_result('A', mx_host, only_positive=True)
-                    except Exception:
-                        mx_a_cached = None
-                    try:
-                        mx_aaaa_cached = await dns_lookup.get_cached_result('AAAA', mx_host, only_positive=True)
-                    except Exception:
-                        mx_aaaa_cached = None
-                    if mx_a_cached and mx_a_cached[1]:
+                    mx_a, mx_a_ttl, mx_a_live, mx_aaaa, mx_aaaa_ttl = await _host_ips_from_cache(mx_host)
+                    if mx_a:
+                        record.records['mx_host_a'] = mx_a
+                        if mx_a_live:
+                            record.meta['risk_cache_miss_mx_a'] = 'true'
                         try:
-                            record.records['mx_host_a'] = [str(x) for x in mx_a_cached[1]]
-                        except Exception:
-                            record.records['mx_host_a'] = mx_a_cached[1]
-                        try:
-                            if mx_a_cached[2] is not None:
-                                record.meta['mx_host_a_ttl'] = int(mx_a_cached[2])
+                            if mx_a_ttl is not None:
+                                record.meta['mx_host_a_ttl'] = int(mx_a_ttl)
                         except Exception:
                             pass
-                    if mx_aaaa_cached and mx_aaaa_cached[1]:
+                    if mx_aaaa:
+                        record.records['mx_host_aaaa'] = mx_aaaa
                         try:
-                            record.records['mx_host_aaaa'] = [str(x) for x in mx_aaaa_cached[1]]
-                        except Exception:
-                            record.records['mx_host_aaaa'] = mx_aaaa_cached[1]
-                        try:
-                            if mx_aaaa_cached[2] is not None:
-                                record.meta['mx_host_aaaa_ttl'] = int(mx_aaaa_cached[2])
-                        except Exception:
-                            pass
-                    # Minimal live fallback for A on cache miss; persist and flag risk
-                    if not record.records.get('mx_host_a'):
-                        try:
-                            r_a, ans_a, ttl_a = await dns_lookup.lookup_a(mx_host, resolver, semaphore)
-                            if r_a == 'NOERROR' and ans_a:
-                                try:
-                                    record.records['mx_host_a'] = [str(x) for x in ans_a]
-                                except Exception:
-                                    record.records['mx_host_a'] = ans_a
-                                try:
-                                    record.meta['risk_cache_miss_mx_a'] = 'true'
-                                except Exception:
-                                    pass
-                                # Report update if read-only; else write locally
-                                try:
-                                    if dns_lookup.is_lmdb_readonly():
-                                        try:
-                                            from kv.update_reporter import report_dns_update
-                                            report_dns_update('A', mx_host, r_a, ans_a, ttl_a)
-                                        except Exception:
-                                            pass
-                                    else:
-                                        await dns_lookup.check_changed_and_enqueue_update('A', mx_host, r_a, ans_a, ttl_a)
-                                except Exception:
-                                    pass
+                            if mx_aaaa_ttl is not None:
+                                record.meta['mx_host_aaaa_ttl'] = int(mx_aaaa_ttl)
                         except Exception:
                             pass
             else:
@@ -643,8 +634,7 @@ async def fetch_domain(
         if not isinstance(grouped_results[2], BaseException):
             txt_rcode, txt_answers, txt_ttl = grouped_results[2]
             try:
-                # DEBUG: Log initial TXT result
-                logger.info(f"[TXT] Initial result for {domain}: rcode={txt_rcode}, answers={txt_answers}")
+                logger.debug(f"[TXT] Initial result for {domain}: rcode={txt_rcode}, answers={txt_answers}")
                 record.meta['txt_rcode'] = txt_rcode
             except Exception:
                 pass
@@ -662,14 +652,12 @@ async def fetch_domain(
                     except Exception:
                         registered_txt = domain
 
-                    # DEBUG: Log fallback attempt
-                    logger.info(f"[TXT] Attempting fallback for {domain} -> {registered_txt}")
+                    logger.debug(f"[TXT] Attempting fallback for {domain} -> {registered_txt}")
 
                     if registered_txt and registered_txt != domain:
                         r_reg, a_reg, ttl_reg = await dns_lookup.lookup_txt(registered_txt, resolver, semaphore)
 
-                        # DEBUG: Log fallback result
-                        logger.info(f"[TXT] Fallback result for {registered_txt}: rcode={r_reg}, answers={a_reg}")
+                        logger.debug(f"[TXT] Fallback result for {registered_txt}: rcode={r_reg}, answers={a_reg}")
 
                         if r_reg == 'NOERROR' and a_reg:
                             existing = record.records.get('txt') or []
@@ -747,9 +735,12 @@ async def fetch_domain(
             except Exception:
                 pass
 
-        # SOA structured: capture full SOA fields for change tracking
+        # SOA structured (index 5 in the Phase 3 gather): full SOA fields for change tracking
         try:
-            r_s, soa_struct_list, soa_struct_ttl = await dns_lookup.lookup_soa_struct(domain, resolver, semaphore)
+            _soa_struct_res = grouped_results[5]
+            if isinstance(_soa_struct_res, BaseException):
+                raise _soa_struct_res
+            r_s, soa_struct_list, soa_struct_ttl = _soa_struct_res
             if r_s == 'NOERROR' and soa_struct_list:
                 record.meta['soa_struct'] = soa_struct_list
                 try:
@@ -763,18 +754,11 @@ async def fetch_domain(
         except Exception:
             pass
 
-        # SRV: Only for new domains (or when configured to always collect), focusing on high-risk services
-        try:
-            srv_mode = os.getenv('DNS_COLLECT_SRV', 'new_only').strip().lower()
-        except Exception:
-            srv_mode = 'new_only'
-        should_collect_srv = (srv_mode == 'always') or (srv_mode == 'new_only' and any_changed)
+        # SRV (fetched in the Phase 3 gather when enabled), high-risk services only
         if should_collect_srv:
-            srv_services = ["_xmpp._tcp", "_sip._tcp"]
             srv_records: Dict[str, Any] = {}
             srv_errors: Dict[str, str] = {}
-            srv_tasks = [dns_lookup.lookup_srv_struct(f"{svc}.{domain}", resolver, semaphore) for svc in srv_services]
-            srv_results = await asyncio.gather(*srv_tasks, return_exceptions=True)
+            srv_results = grouped_results[_SRV_BASE:_SRV_BASE + len(srv_services)]
             srv_ttl_map: Dict[str, int] = {}
             for idx, svc in enumerate(srv_services):
                 res = srv_results[idx]
@@ -817,16 +801,8 @@ async def fetch_domain(
             if srv_ttl_map:
                 record.meta['srv_ttl'] = srv_ttl_map
 
-        # Phase 3.8: Email-auth & hygiene records — fetch EVERYTHING available for
-        # the domain. These live on dedicated subdomains / rrtypes and were never
-        # queried by the batch path, which is why spf/dmarc/bimi/mta_sts/tlsrpt/
-        # dnssec were empty corpus-wide in bronze. Values go into record.records so
-        # the expanded-row flattener picks them up; failures never fail the row.
-        # Cost: 5 concurrent UDP lookups against the local recursor per domain.
-        try:
-            registered_auth = reg_domain(domain) or domain
-        except Exception:
-            registered_auth = domain
+        # Phase 3.8: Email-auth & hygiene records — the lookups themselves ran
+        # in the Phase 3 gather (indices 6-10); only extraction happens here.
         # SPF lives in the apex TXT we already fetched — no extra query.
         try:
             _txts = record.records.get('txt') or []
@@ -836,14 +812,7 @@ async def fetch_domain(
         except Exception:
             pass
         try:
-            auth_results = await asyncio.gather(
-                dns_lookup.lookup_txt(f"_dmarc.{registered_auth}", resolver, semaphore),
-                dns_lookup.lookup_txt(f"_mta-sts.{registered_auth}", resolver, semaphore),
-                dns_lookup.lookup_txt(f"_smtp._tls.{registered_auth}", resolver, semaphore),
-                dns_lookup.lookup_txt(f"default._bimi.{registered_auth}", resolver, semaphore),
-                dns_lookup.perform_lookup('DNSKEY', registered_auth, resolver, semaphore, False),
-                return_exceptions=True,
-            )
+            auth_results = grouped_results[6:11]
 
             def _first_txt(res, marker):
                 if isinstance(res, BaseException):
@@ -951,11 +920,18 @@ async def fetch_domain(
             except Exception:
                 ptr_dir = None
 
-            for ip in all_ips:
+            try:
+                do_ptr_miss_default = os.getenv('DNS_PTR_ON_MISS', '0').strip().lower() in ('1','true','yes','on')
+            except Exception:
+                do_ptr_miss_default = False
+
+            async def _ptr_for_ip(ip: str):
+                """Cache-first PTR for one IP; live on miss for MX/NS IPs (or
+                when DNS_PTR_ON_MISS). Returns (ip, value) or None."""
                 try:
                     reverse_name = ipaddress.ip_address(ip).reverse_pointer
                 except Exception:
-                    continue
+                    return None
                 try:
                     cached = await dns_lookup.get_cached_result('PTR', reverse_name, only_positive=True, env_name='ptr')
                 except Exception:
@@ -963,55 +939,56 @@ async def fetch_domain(
 
                 if cached and cached[1]:
                     try:
-                        val = str(cached[1][0]).rstrip('.')
-                        ptr_map[ip] = val
+                        return ip, str(cached[1][0]).rstrip('.')
                     except Exception:
-                        ptr_map[ip] = str(cached[1][0])
-                else:
-                    # Optional live PTR on miss
-                    try:
-                        do_ptr_miss = os.getenv('DNS_PTR_ON_MISS', '0').strip().lower() in ('1','true','yes','on')
-                    except Exception:
-                        do_ptr_miss = False
+                        return ip, str(cached[1][0])
 
-                    # Force fill-on-miss for MX IPs per user instruction matches "main domain A/PTR logic"
-                    if ip in mx_ips or (ns_ips and ip in ns_ips):
-                        do_ptr_miss = True
+                # Force fill-on-miss for MX/NS IPs, matching main domain A/PTR logic
+                do_ptr_miss = do_ptr_miss_default or ip in mx_ips or (bool(ns_ips) and ip in ns_ips)
+                if not do_ptr_miss:
+                    return None
+                try:
+                    r_ptr, a_ptr, ttl_ptr = await dns_lookup.lookup_ptr(reverse_name, resolver, semaphore)
+                except Exception:
+                    return None
+                if r_ptr != 'NOERROR' or not a_ptr:
+                    return None
 
-                    if do_ptr_miss:
+                # Report PTR update to master or write locally
+                try:
+                    if dns_lookup.is_lmdb_readonly():
                         try:
-                            r_ptr, a_ptr, ttl_ptr = await dns_lookup.lookup_ptr(reverse_name, resolver, semaphore)
-                            if r_ptr == 'NOERROR' and a_ptr:
-                                try:
-                                    val = str(a_ptr[0]).rstrip('.')
-                                    ptr_map[ip] = val
-                                except Exception:
-                                    ptr_map[ip] = str(a_ptr[0])
-
-                                # Report PTR update to master or write locally
-                                try:
-                                    if dns_lookup.is_lmdb_readonly():
-                                        try:
-                                            from kv.update_reporter import report_ptr_update
-                                            report_ptr_update(reverse_name, r_ptr, a_ptr, ttl_ptr)
-                                        except Exception:
-                                            pass
-                                    else:
-                                        # Write directly to PTR LMDB if available
-                                        try:
-                                            dns_lookup.init_lmdb_ptr(ptr_dir or os.getenv('DNS_LMDB_PTR_DIR', '/mnt/shared/dns_lmdb_ptr'), readonly=True, lock=False)
-                                            env_ptr = dns_lookup._lmdb_env_ptr
-                                            if env_ptr is not None:
-                                                key = dns_lookup._cache_key('PTR', reverse_name)
-                                                val = dns_lookup._serialize_value(r_ptr, a_ptr, ttl_ptr)
-                                                with env_ptr.begin(write=True) as txn:
-                                                    txn.put(key.encode('utf-8'), val)
-                                        except Exception:
-                                            pass
-                                except Exception:
-                                    pass
+                            from kv.update_reporter import report_ptr_update
+                            report_ptr_update(reverse_name, r_ptr, a_ptr, ttl_ptr)
                         except Exception:
                             pass
+                    else:
+                        # Write directly to PTR LMDB if available
+                        try:
+                            dns_lookup.init_lmdb_ptr(ptr_dir or os.getenv('DNS_LMDB_PTR_DIR', '/mnt/shared/dns_lmdb_ptr'), readonly=True, lock=False)
+                            env_ptr = dns_lookup._lmdb_env_ptr
+                            if env_ptr is not None:
+                                key = dns_lookup._cache_key('PTR', reverse_name)
+                                val = dns_lookup._serialize_value(r_ptr, a_ptr, ttl_ptr)
+                                with env_ptr.begin(write=True) as txn:
+                                    txn.put(key.encode('utf-8'), val)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    return ip, str(a_ptr[0]).rstrip('.')
+                except Exception:
+                    return ip, str(a_ptr[0])
+
+            # All IPs resolved concurrently — previously a serial per-IP loop
+            ptr_results = await asyncio.gather(
+                *(_ptr_for_ip(ip) for ip in all_ips), return_exceptions=True
+            )
+            for pr in ptr_results:
+                if pr is None or isinstance(pr, BaseException):
+                    continue
+                ptr_map[pr[0]] = pr[1]
             if ptr_map:
                 record.records['PTR'] = ptr_map
                 record.records['ptr'] = ptr_map
@@ -1055,77 +1032,65 @@ async def fetch_domain(
         www_domain = f"www.{registered}"
         mail_domain = f"mail.{registered}"
 
-        # Check if www exists
-        www_check_rcode, www_check_answers, _ = await dns_lookup.lookup_a(www_domain, resolver, semaphore)
-        if www_check_rcode == 'NOERROR' and www_check_answers:
-            # www exists, fetch its records
-            www_a_task = dns_lookup.lookup_a(www_domain, resolver, semaphore)
-            www_aaaa_task = dns_lookup.lookup_aaaa(www_domain, resolver, semaphore)
-            www_results = await asyncio.gather(www_a_task, www_aaaa_task, return_exceptions=True)
-
-            www_records = {}
-            if not isinstance(www_results[0], BaseException):
-                rcode, answers, ttl = www_results[0]
-                if rcode == 'NOERROR' and answers:
-                    www_records['A'] = answers
-            if not isinstance(www_results[1], BaseException):
-                rcode, answers, ttl = www_results[1]
-                if rcode == 'NOERROR' and answers:
-                    www_records['AAAA'] = answers
-
-            if www_records:
-                record.records['www'] = www_records
-
-        # Check if mail exists
-        mail_check_rcode, mail_check_answers, _ = await dns_lookup.lookup_a(mail_domain, resolver, semaphore)
-        if mail_check_rcode == 'NOERROR' and mail_check_answers:
-            # mail exists, fetch its records
-            mail_a_task = dns_lookup.lookup_a(mail_domain, resolver, semaphore)
-            mail_aaaa_task = dns_lookup.lookup_aaaa(mail_domain, resolver, semaphore)
-            mail_results = await asyncio.gather(mail_a_task, mail_aaaa_task, return_exceptions=True)
-
-            mail_records = {}
-            if not isinstance(mail_results[0], BaseException):
-                rcode, answers, ttl = mail_results[0]
-                if rcode == 'NOERROR' and answers:
-                    mail_records['A'] = answers
-            if not isinstance(mail_results[1], BaseException):
-                rcode, answers, ttl = mail_results[1]
-                if rcode == 'NOERROR' and answers:
-                    mail_records['AAAA'] = answers
-
-            if mail_records:
-                record.records['mail'] = mail_records
-
-            # Cache-backfill: use LMDB cached answers when live lookups returned empty
+        # www/mail checked concurrently. The existence check IS the A fetch —
+        # the old code issued the same A lookup a second time after the check.
+        async def _check_sub(sub_fqdn: str) -> Dict[str, Any]:
+            sub_records: Dict[str, Any] = {}
             try:
-                _fallback_toggle = os.getenv('DNS_OUTPUT_USE_CACHE_FALLBACK', '1').strip().lower() in ('1','true','yes','on')
+                a_rc, a_ans, _a_ttl = await dns_lookup.lookup_a(sub_fqdn, resolver, semaphore)
             except Exception:
-                _fallback_toggle = True
-            if _fallback_toggle:
-                async def _backfill(rtype: str, ttl_meta_key: Optional[str] = None):
-                    try:
-                        has_vals = record.records.get(rtype)
-                        if not has_vals:
-                            cached = await dns_lookup.get_cached_result(rtype, domain, only_positive=True)
-                            if cached:
-                                _rc, _ans, _ttl = cached
-                                record.records[rtype] = _ans
-                                record.records[rtype.lower()] = _ans
-                                if ttl_meta_key and (_ttl is not None):
-                                    try:
-                                        record.meta[ttl_meta_key] = int(_ttl)
-                                    except Exception:
-                                        record.meta[ttl_meta_key] = _ttl
-                    except Exception:
-                        pass
-                await asyncio.gather(
-                    _backfill('NS', 'ns_ttl'),
-                    _backfill('SOA', 'soa_ttl'),
-                    _backfill('A', 'a_ttl'),
-                    _backfill('AAAA', 'aaaa_ttl'),
-                    _backfill('TXT', 'txt_ttl'),
-                )
+                return sub_records
+            if a_rc != 'NOERROR' or not a_ans:
+                return sub_records
+            sub_records['A'] = a_ans
+            try:
+                aaaa_rc, aaaa_ans, _aaaa_ttl = await dns_lookup.lookup_aaaa(sub_fqdn, resolver, semaphore)
+                if aaaa_rc == 'NOERROR' and aaaa_ans:
+                    sub_records['AAAA'] = aaaa_ans
+            except Exception:
+                pass
+            return sub_records
+
+        www_records, mail_records = await asyncio.gather(
+            _check_sub(www_domain), _check_sub(mail_domain), return_exceptions=True
+        )
+        if not isinstance(www_records, BaseException) and www_records:
+            record.records['www'] = www_records
+        if not isinstance(mail_records, BaseException) and mail_records:
+            record.records['mail'] = mail_records
+
+        # Cache-backfill: use LMDB cached answers when live lookups returned
+        # empty. NOTE: this was previously indented inside the "mail exists"
+        # branch and silently skipped for domains without a mail. subdomain —
+        # per its own comment it is meant to run for every domain.
+        try:
+            _fallback_toggle = os.getenv('DNS_OUTPUT_USE_CACHE_FALLBACK', '1').strip().lower() in ('1','true','yes','on')
+        except Exception:
+            _fallback_toggle = True
+        if _fallback_toggle:
+            async def _backfill(rtype: str, ttl_meta_key: Optional[str] = None):
+                try:
+                    has_vals = record.records.get(rtype)
+                    if not has_vals:
+                        cached = await dns_lookup.get_cached_result(rtype, domain, only_positive=True)
+                        if cached:
+                            _rc, _ans, _ttl = cached
+                            record.records[rtype] = _ans
+                            record.records[rtype.lower()] = _ans
+                            if ttl_meta_key and (_ttl is not None):
+                                try:
+                                    record.meta[ttl_meta_key] = int(_ttl)
+                                except Exception:
+                                    record.meta[ttl_meta_key] = _ttl
+                except Exception:
+                    pass
+            await asyncio.gather(
+                _backfill('NS', 'ns_ttl'),
+                _backfill('SOA', 'soa_ttl'),
+                _backfill('A', 'a_ttl'),
+                _backfill('AAAA', 'aaaa_ttl'),
+                _backfill('TXT', 'txt_ttl'),
+            )
 
         return record
 
