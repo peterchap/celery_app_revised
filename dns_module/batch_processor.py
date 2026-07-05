@@ -717,7 +717,7 @@ class BatchProcessor:
         self,
         domains: Iterable[str],
         retry_limit: Optional[int] = None
-    ) -> Tuple[str, Optional[str]]:
+    ) -> Dict[str, Any]:
         """
         Process a batch of domains.
 
@@ -729,7 +729,8 @@ class BatchProcessor:
         5. Build and write expanded parquet (main corpus → Flight → master)
         6. Build and write graph tables (entity_domain, entity_ip, entity_edge)
         7. Write retries parquet
-        8. Return (expanded_path, retries_path)
+        8. Return dict: results_path, retries_path, domain_count,
+           success_count (status == 'alive'), status_counts, elapsed_s
 
         Note: dns_results removed — master updates LMDB from dns_expanded via Flight.
         """
@@ -973,12 +974,27 @@ class BatchProcessor:
         # Step 8: Throughput metrics
         elapsed = time.time() - start_time
         throughput = domain_count / elapsed if elapsed > 0 else 0
+
+        status_counts: Dict[str, int] = {}
+        for rec in results:
+            s = str(getattr(rec, "status", "") or "unknown")
+            status_counts[s] = status_counts.get(s, 0) + 1
+        success_count = status_counts.get("alive", 0)
+
         self.log.info(
             f"Batch complete: {domain_count} domains in {elapsed:.2f}s "
-            f"({throughput:.1f} domains/s)"
+            f"({throughput:.1f} domains/s) statuses={status_counts} retries={len(retries)}"
         )
 
-        return str(expanded_path), str(retries_path) if retries_path else None
+        return {
+            "results_path": str(expanded_path),
+            "retries_path": str(retries_path) if retries_path else None,
+            "domain_count": domain_count,
+            "success_count": success_count,
+            "status_counts": status_counts,
+            "retry_count": len(retries),
+            "elapsed_s": elapsed,
+        }
 
     def join_tables(self, dns_records: List[DNSRecord]) -> pa.Table:
         """Convert DNSRecord list to compact PyArrow table — used for retries."""

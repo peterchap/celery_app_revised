@@ -106,11 +106,14 @@ async def demo_batch_processor():
         print()
         
         # Process batch
-        results_path, retries_path = await bp.process(test_domains)
-        
+        result = await bp.process(test_domains)
+        results_path = result["results_path"]
+        retries_path = result["retries_path"]
+
         print("Processing complete:")
         print(f"  - Results file: {results_path}")
         print(f"  - Retries file: {retries_path}")
+        print(f"  - Statuses: {result['status_counts']}")
         print()
         
         # Verify files exist

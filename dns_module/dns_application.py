@@ -423,7 +423,10 @@ class DNSApplication:
             source_feed=getattr(self, "source_feed", "zone_file")
         )
         try:
-            results_path, retries_path = await bp.process(group_domains)
-            app_logger.info("Completed TLD group {}: results={} retries={}", tld, results_path, retries_path)
+            result = await bp.process(group_domains)
+            app_logger.info(
+                "Completed TLD group {}: results={} retries={} statuses={}",
+                tld, result.get("results_path"), result.get("retries_path"), result.get("status_counts"),
+            )
         except Exception as e:
             app_logger.error("TLD group task failed: %r\n%s", e, traceback.format_exc())
