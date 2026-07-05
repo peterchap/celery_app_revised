@@ -171,7 +171,6 @@ def main():
             input_directory=str(input_dir),
             output_directory=str(output_dir),
             file_key=file_key,
-            scoring_profile=[args.profile],
             nameservers=ns_list
         )
 
