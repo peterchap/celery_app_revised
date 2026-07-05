@@ -72,8 +72,20 @@ class DNSApplication:
         # Per-TLD limits from CONFIG unless overridden
         self.tld_rate_limits = tld_rate_limits or CONFIG.tld_rate_limits
 
-        # Nameservers default from CONFIG unless overridden
-        self.nameservers = nameservers if nameservers is not None else CONFIG.nameservers
+        # Nameservers: explicit arg > prio-specific resolver > CONFIG default.
+        # Certstream/prio files can use a dedicated fresh-data Unbound instance
+        # (no serve-expired, no cache-min-ttl) via DNS_NAMESERVERS_PRIO, so the
+        # threat feed never reads stale or negatively-cached answers. Bulk
+        # batches keep the throughput-tuned default resolver.
+        if nameservers is not None:
+            self.nameservers = nameservers
+        else:
+            _prio_ns = os.getenv("DNS_NAMESERVERS_PRIO", "").strip()
+            if _prio_ns and "prio_" in (file_key or "").lower():
+                self.nameservers = [s.strip() for s in _prio_ns.split(",") if s.strip()]
+                app_logger.info("Prio workload {}: using fresh-data resolver(s) {}", file_key, self.nameservers)
+            else:
+                self.nameservers = CONFIG.nameservers
 
         # Ensure dns_lookup uses the same application logger if dns_lookup supports a setter.
         try:

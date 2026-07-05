@@ -95,32 +95,43 @@ def _update_lmdb_signatures(table: pa.Table) -> None:
         log.warning(f"LMDB update skipped — missing columns: {required - present}")
         return
     rows = table.to_pylist()
+
+    # Phase 1: compute all signatures (pure CPU, no LMDB). Duplicate domains
+    # within a flush collapse to the last row — same end state as the old
+    # per-row loop, without the intermediate writes.
+    sigs = {}
+    for row in rows:
+        try:
+            domain = row.get("domain")
+            if not domain:
+                continue
+            sigs[domain] = LMDBActivity.compute_signature_dict({
+                "ns":                row.get("ns", ""),
+                "a":                 row.get("a", ""),
+                "mx_regdom":         row.get("mx_regdom_final") or row.get("mx_domain", ""),
+                "registered_domain": row.get("registered_domain", ""),
+                "mx_ips":            row.get("mx_ips", ""),
+            })
+        except Exception as e:
+            log.debug(f"LMDB sig compute failed for {row.get('domain')}: {e}")
+
+    # Phase 2: one read txn to diff, one write txn for the changed set —
+    # replaces a read txn + conditional write txn PER ROW.
     updated = 0
-    skipped = 0
     try:
         with LMDBActivity(LMDB_PATH, readonly=False) as kv:
-            for row in rows:
-                try:
-                    domain = row.get("domain")
-                    if not domain:
-                        continue
-                    sig = LMDBActivity.compute_signature_dict({
-                        "ns":                row.get("ns", ""),
-                        "a":                 row.get("a", ""),
-                        "mx_regdom":         row.get("mx_regdom_final") or row.get("mx_domain", ""),
-                        "registered_domain": row.get("registered_domain", ""),
-                        "mx_ips":            row.get("mx_ips", ""),
-                    })
-                    if kv.changed(domain, sig):
-                        kv.set_sig(domain, sig)
-                        updated += 1
-                    else:
-                        skipped += 1
-                except Exception as e:
-                    log.debug(f"LMDB sig update failed for {row.get('domain')}: {e}")
+            stored = kv.batch_get_sig(list(sigs.keys()))
+            to_write = {}
+            for domain, sig in sigs.items():
+                state = stored.get(domain)
+                new_str = sig.decode("ascii", "ignore")
+                if state is None or state.get("sig", "") != new_str:
+                    to_write[domain] = sig
+            updated = kv.batch_set_sig(to_write)
     except Exception as e:
         log.error(f"LMDB signature update failed: {e}")
         return
+    skipped = len(sigs) - updated
     log.info(f"LMDB signatures: {updated} updated, {skipped} unchanged out of {len(rows)} rows")
 
 @dataclass

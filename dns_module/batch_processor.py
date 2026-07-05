@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import threading
 import time
 import os
 import re
@@ -26,6 +27,32 @@ log = get_child_logger("batch_processor")
 DEFAULT_WORKERS = DEFAULT_BATCH_WORKERS
 DEFAULT_SEMAPHORE_LIMIT = 800
 NFS_BASE = Path(os.getenv("NFS_BASE", "/mnt/shared/"))
+
+# Flight clients cached per URL — BatchProcessors are created per TLD chunk,
+# so a per-instance client would still reconnect every chunk. FlightClient is
+# thread-safe, so concurrent TLD groups can share one connection.
+_FLIGHT_CLIENTS: Dict[str, flight.FlightClient] = {}
+_FLIGHT_CLIENTS_LOCK = threading.Lock()
+
+
+def _get_flight_client(url: str) -> flight.FlightClient:
+    with _FLIGHT_CLIENTS_LOCK:
+        client = _FLIGHT_CLIENTS.get(url)
+        if client is None:
+            client = flight.FlightClient(url)
+            _FLIGHT_CLIENTS[url] = client
+        return client
+
+
+def _drop_flight_client(url: str) -> None:
+    """Discard a cached client after an error so the next write reconnects."""
+    with _FLIGHT_CLIENTS_LOCK:
+        client = _FLIGHT_CLIENTS.pop(url, None)
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 def _normalize_ns_value(ns_in: Any) -> str:
@@ -691,11 +718,15 @@ class BatchProcessor:
 
     async def write_flight(self, table: pa.Table, dataset_name: str):
         def _do_write():
-            client = flight.FlightClient(self.flight_server_url)
+            client = _get_flight_client(self.flight_server_url)
             descriptor = flight.FlightDescriptor.for_path(dataset_name)
-            writer, _ = client.do_put(descriptor, table.schema)
-            writer.write_table(table)
-            writer.close()
+            try:
+                writer, _ = client.do_put(descriptor, table.schema)
+                writer.write_table(table)
+                writer.close()
+            except Exception:
+                _drop_flight_client(self.flight_server_url)
+                raise
         await asyncio.to_thread(_do_write)
         self.log.info(f"Streamed {dataset_name} to Flight Server at {self.flight_server_url}")
 
@@ -903,7 +934,10 @@ class BatchProcessor:
         # Step 5: Build and write expanded parquet (main corpus)
         # This is sent via Flight to master which updates LMDB from dns_expanded
         expanded_path = self.output_dir / f"{self.file_key}_expanded.parquet"
-        try:
+
+        def _build_expanded_table() -> pa.Table:
+            # Pure-CPU row flattening (78 fields/domain) — runs in a worker
+            # thread so concurrent TLD groups' DNS traffic isn't stalled.
             expanded_rows = []
             for rec in results:
                 try:
@@ -936,11 +970,14 @@ class BatchProcessor:
                         
                         "errors_json": "{}", "meta_json": "{}",
                     })
-            expanded_table = pa.Table.from_pylist(expanded_rows, schema=get_dns_expanded_schema())
+            return pa.Table.from_pylist(expanded_rows, schema=get_dns_expanded_schema())
+
+        try:
+            expanded_table = await asyncio.to_thread(_build_expanded_table)
             # Isolate threat feeds to their own dataset to avoid mingling with standard 320M domains
             out_dataset = "hourly_threat" if "prio_" in self.file_key.lower() else "dns_expanded"
             await self.write_output(expanded_table, expanded_path, out_dataset)
-            self.log.info("Expanded table written: rows={}, dataset={}", len(expanded_rows), out_dataset)
+            self.log.info("Expanded table written: rows={}, dataset={}", expanded_table.num_rows, out_dataset)
         except Exception as e:
             self.log.error("Failed to write expanded table: {}", e, exc_info=True)
             raise

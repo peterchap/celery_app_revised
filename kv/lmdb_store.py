@@ -289,6 +289,19 @@ class LMDBActivity:
         with self.env.begin(db=self.db, write=True) as txn:
             txn.put(self._b(domain), sig)
 
+    def batch_set_sig(self, sigs: Dict[str, bytes]) -> int:
+        """
+        Write many legacy v1 signatures in a single write transaction.
+        Counterpart to batch_get_sig() — one txn instead of N set_sig() calls.
+        Returns the number of keys written.
+        """
+        if self.readonly or not sigs:
+            return 0
+        with self.env.begin(db=self.db, write=True) as txn:
+            for domain, sig in sigs.items():
+                txn.put(self._b(domain), sig)
+        return len(sigs)
+
     def set_record(
         self,
         domain:    str,
