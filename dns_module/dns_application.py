@@ -285,6 +285,11 @@ class DNSApplication:
             self.source_feed = "certstream_new_domains"
         elif "signals" in fk_lower:
             self.source_feed = "certstream_signals"
+        elif "burst" in fk_lower:
+            # Subdomain-burst roots dispatched via master do_put's burst_anomalies
+            # branch (prio_burst_* files). Tagging the source lets the master fork the
+            # resolved rows out of the hourly_threat return into the burst infra-scorer.
+            self.source_feed = "certstream_burst"
         else:
             self.source_feed = "zone_file"
 
