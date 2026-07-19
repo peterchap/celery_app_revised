@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datazag-dns-module"
-version = "1.1.0"
+version = "1.2.0"
 description = "Datazag shared DNS collection engine (dns_module + kv) — canonical home, consumed by the celery worker fleet and all pipeline servers"
 requires-python = ">=3.10"
 dependencies = [
