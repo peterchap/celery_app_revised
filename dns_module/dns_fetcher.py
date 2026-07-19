@@ -1217,6 +1217,26 @@ class DNSFetcher:
                 # a/aaaa
                 exp_map["a"] = recs.get("a") or recs.get("A") or []
                 exp_map["aaaa"] = recs.get("aaaa") or recs.get("AAAA") or []
+                # mx: fetch_domain stores MX as "pref:host" strings, but the norm
+                # below (mx_list -> mx_host_input) expects (pref, host) tuples.
+                # Without this copy MX drops out of every expanded fetch
+                # (mx/mx_host_final/mx_regdom_final all empty). Sorted by
+                # preference so the primary MX is first.
+                mx_raw = recs.get("mx") or recs.get("MX") or []
+                if isinstance(mx_raw, str):
+                    mx_raw = [mx_raw]
+                mx_parsed = []
+                for ans in mx_raw:
+                    s = str(ans).strip()
+                    if not s:
+                        continue
+                    pref, host = 0, s
+                    parts = s.split(":", 1)
+                    if len(parts) == 2 and parts[0].strip().isdigit():
+                        pref, host = int(parts[0].strip()), parts[1]
+                    mx_parsed.append((pref, host.rstrip(".")))
+                mx_parsed.sort(key=lambda t: t[0])
+                exp_map["mx"] = mx_parsed
                 # errors
                 exp_map["a_error"] = errs.get("A") or ""
                 exp_map["ns_error"] = errs.get("NS") or ""
@@ -1247,6 +1267,14 @@ class DNSFetcher:
                 exp_map = expanded
             else:
                 exp_map = {}
+
+            # From here on the normalised map IS the expanded result. Downstream
+            # code reads `expanded` directly in ~9 places; when fetch_domain
+            # returned a DNSRecord those reads hit the raw object and raised
+            # AttributeError ('DNSRecord' object has no attribute 'get'), which
+            # made this whole class unusable. In the dict branch exp_map is the
+            # same object, so rebinding is a no-op there.
+            expanded = exp_map
 
             # Core fields
             ns_list = exp_map.get("ns") or []
