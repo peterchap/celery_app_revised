@@ -660,6 +660,23 @@ def _put_in_inmem_cache(key: str, rcode: str, answers: List[str], ttl: int):
 # --------------------------------------------------------------------
 # Public cache helper
 # --------------------------------------------------------------------
+_DISABLE_CACHE: Optional[bool] = None
+
+
+def _cache_disabled() -> bool:
+    """Global kill-switch for ALL DNS caching (in-mem + LMDB), via DNS_DISABLE_CACHE.
+
+    Default OFF — batch processing keeps its cache untouched. The realtime
+    report/alert collector sets DNS_DISABLE_CACHE=1 in its own process so every
+    lookup is answered live (the LMDB negative cache otherwise returns a stale
+    empty MX even when the live record exists). Evaluated lazily on first use so
+    the flag need only be set before the first lookup, not before import."""
+    global _DISABLE_CACHE
+    if _DISABLE_CACHE is None:
+        _DISABLE_CACHE = os.getenv("DNS_DISABLE_CACHE", "0").strip().lower() in ("1", "true", "yes", "on")
+    return _DISABLE_CACHE
+
+
 async def get_cached_result(
     rtype: str,
     name: str,
@@ -668,6 +685,8 @@ async def get_cached_result(
     include_expired: bool = False,
     env_name: Optional[str] = None,
 ) -> Optional[Tuple[str, List[str], int]]:
+    if _cache_disabled():
+        return None
     key = _cache_key(rtype, name)
     if (env_name or '').lower() == 'ptr':
         lmdb_result = await _read_from_lmdb_ptr(key)
@@ -699,11 +718,15 @@ async def perform_lookup(
 ) -> Tuple[str, List[str], int]:
     key = _cache_key(rtype, name)
 
-    cached = _get_from_inmem_cache(key)
-    if cached is not None:
-        return cached
+    # Realtime collector: skip ALL caching, answer live (fresh MX/etc.).
+    cache_off = _cache_disabled()
 
-    persist_type = _cache_enabled_for_type(rtype) if use_lmdb else False
+    if not cache_off:
+        cached = _get_from_inmem_cache(key)
+        if cached is not None:
+            return cached
+
+    persist_type = (_cache_enabled_for_type(rtype) if use_lmdb else False) and not cache_off
 
     if persist_type:
         lmdb_result = await _read_from_lmdb(key)
