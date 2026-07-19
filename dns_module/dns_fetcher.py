@@ -1684,7 +1684,7 @@ class DNSFetcher:
                 aaaa=aaaa_str,
                 ip_int=ip_int,
                 a_ttl=a_ttl,
-                ptr=ptrs.get(a_list[0], "") if a_list and ptrs else (ptrs.get(a_list[0], "") if ptrs else ""),
+                ptr=ptrs.get(a_list[0], "") if (a_list and ptrs) else "",
                 cname=expanded.get("cname", "") or "",
                 mx=mx_host_input or "",
                 mx_priority=mx_pref or 0,

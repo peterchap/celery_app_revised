@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datazag-dns-module"
+version = "1.0.0"
+description = "Datazag shared DNS collection engine (dns_module + kv) — canonical home, consumed by the celery worker fleet and all pipeline servers"
+requires-python = ">=3.10"
+dependencies = [
+    "dnspython",
+    "pyarrow",
+    "python-dotenv",
+    "lmdb",
+    "loguru",
+    "aiohttp",
+    "idna",
+    "tldextract",
+    "xxhash",
+    "polars",
+]
+
+[tool.setuptools]
+# Ship exactly the shared library: dns_module + its hard dependency kv.
+# The celery app around them (task.py, celery_app.py, master_flight_server.py)
+# is deployment, not library, and is NOT part of the package.
+packages = ["dns_module", "kv"]
+
+[tool.setuptools.package-data]
+dns_module = ["banner_mapping.csv"]
