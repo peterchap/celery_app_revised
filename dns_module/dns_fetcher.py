@@ -1261,6 +1261,11 @@ class DNSFetcher:
                     exp_map["soa_struct"] = meta.get("soa_struct") or []
                 except Exception:
                     exp_map["soa_struct"] = []
+                # resolved IPs of the NS hosts (required by DNSRecords)
+                exp_map["ns_ips"] = (
+                    recs.get("ns_ips")
+                    or (recs.get("ns_host_a") or []) + (recs.get("ns_host_aaaa") or [])
+                )
                 # Build a simple ptrs map from any PTR answers if present
                 ptrs_map = {}
                 if "PTR" in recs and isinstance(recs.get("PTR"), dict):
@@ -1704,9 +1709,17 @@ class DNSFetcher:
                 srv_struct = [{"raw": s, "service": None, "proto": None, "ttl": None} for s in srv_list]
 
             # Compose record
+            ns_ips_val = exp_map.get("ns_ips") or []
+            if not isinstance(ns_ips_val, list):
+                ns_ips_val = [ns_ips_val] if ns_ips_val else []
+            ns_ips_val = [str(x) for x in ns_ips_val if x]
+            ns_ip_int_val = ip_to_int(ns_ips_val[0]) if ns_ips_val else 0
+
             rec = DNSRecords(
                 domain=self.domain,
                 registered_domain=registered,
+                ns_ips=ns_ips_val,
+                ns_ip_int=ns_ip_int_val,
                 ns1=ns1_str,
                 soa=soa_mname or "",
                 status=status or "",
@@ -2037,9 +2050,13 @@ class DNSFetcher:
         except Exception:
             soa_struct_list = []
 
+        # The legacy fallback does not resolve NS host IPs, but DNSRecords
+        # requires the fields — pass empties rather than raising TypeError.
         rec = DNSRecords(
             domain=self.domain,
             registered_domain=registered,
+            ns_ips=[],
+            ns_ip_int=0,
             ns1=ns1_str,
             soa=soa_mname or "",
             status=status or "",
