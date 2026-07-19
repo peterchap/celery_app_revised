@@ -1256,6 +1256,11 @@ class DNSFetcher:
                     exp_map["soa_serial"] = meta.get("soa_serial")
                 except Exception:
                     pass
+                # full SOA struct, consumed as soa_records on the returned object
+                try:
+                    exp_map["soa_struct"] = meta.get("soa_struct") or []
+                except Exception:
+                    exp_map["soa_struct"] = []
                 # Build a simple ptrs map from any PTR answers if present
                 ptrs_map = {}
                 if "PTR" in recs and isinstance(recs.get("PTR"), dict):
@@ -1777,7 +1782,7 @@ class DNSFetcher:
                 caa_records=caa_struct,
                 naptr_records=naptr_struct,
                 srv_records=srv_struct,
-                soa_records=(record.meta.get('soa_struct') or []),
+                soa_records=(exp_map.get('soa_struct') or []),
                 aaaa_ttl=None,
                 mx_ttl=None,
                 txt_ttl=None,
