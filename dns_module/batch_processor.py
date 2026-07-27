@@ -19,7 +19,10 @@ from .dns_records import DNSRecord
 from .dns_fetcher import fetch_batch, DEFAULT_BATCH_WORKERS
 from .dns_utils import ip_to_int
 from kv.lmdb_store import LMDBActivity
-from .change_tracker import annotate_change_flags_arrow, write_activity_delta_parquet
+# write_activity_delta_parquet is no longer imported — the NFS delta emit was removed
+# 2026-07-27 (see the block in _detect_changes' caller). The function remains in
+# change_tracker for whoever revives the LMDB activity pipeline deliberately.
+from .change_tracker import annotate_change_flags_arrow
 
 from .logger import get_child_logger
 log = get_child_logger("batch_processor")
@@ -918,11 +921,37 @@ class BatchProcessor:
                     mx_ips_col="mx_ips",
                 )
 
-        change_table, deltas = await asyncio.to_thread(_detect_changes)
+        # `deltas` is intentionally discarded — see below. It is still computed because it
+        # falls out of annotate_change_flags_arrow's return; it is an in-memory list, no I/O.
+        change_table, _deltas_unconsumed = await asyncio.to_thread(_detect_changes)
 
-        # Emit deltas for the master aggregator
-        delta_path = str(NFS_BASE / "deltas" / f"delta_{self.file_key}.parquet")
-        await asyncio.to_thread(write_activity_delta_parquet, deltas, delta_path)
+        # REMOVED 2026-07-27: the per-batch delta emit to NFS.
+        #
+        #     delta_path = str(NFS_BASE / "deltas" / f"delta_{self.file_key}.parquet")
+        #     await asyncio.to_thread(write_activity_delta_parquet, deltas, delta_path)
+        #
+        # These were written "for the master aggregator" — dnsproject tools/
+        # lmdb_aggregate_deltas.py, which merges them into a master LMDB and publishes
+        # /srv/lmdb/activity_snapshots/current. That aggregator HAS NEVER RUN in production:
+        # the snapshot dir is empty (created Nov 2025), there are zero *.done files (it renames
+        # consumed inputs), and there is no systemd timer for it. It would also not work if
+        # scheduled — it globs "*.csv" while this writes .parquet (its docstring still says
+        # "Delta CSVs produced by slaves"; the producer migrated to Parquet, the reader never did).
+        #
+        # Cost of the leak, measured on .2 2026-07-27: 610,581 files / 44 GB on /srv/nfs/shared,
+        # and a synchronous parquet write to NFS on EVERY batch into a 610k-entry directory —
+        # so this was adding latency to the DNS processing path for output nobody consumed.
+        #
+        # The INTENT (spot changing domains -> refresh them more often, and risk-score them) is
+        # already served better elsewhere and does not need this path:
+        #   * change signals: compute_historical_velocity -> ip_changes_30d / asn_diversity_30d /
+        #     geo_diversity_30d / ip_churn_score, nightly over the whole corpus;
+        #   * refresh cadence: centralake build_dns_refresh_plan.py, deployed, risk-tiered
+        #     (>=0.7 -> 7d, >=0.5 -> 14d, parked -> 60d, else 30d), 15M/day budget.
+        # Gap noted at removal: those velocity signals reach scenario_domain_risk but are only
+        # emitted into the details JSON — they are NOT summed into combined_risk — so change rate
+        # does not yet influence refresh cadence. Closing that is a scoring change, not a pipeline.
+        # Full write-up: datazag-pipeline/docs/cleanup-register.md.
 
         # Step 4: Write initial retries snapshot
         if retries:
