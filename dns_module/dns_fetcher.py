@@ -315,15 +315,21 @@ async def fetch_domain(
                         record.meta['risk_cache_miss_a'] = 'true'
                     except Exception:
                         pass
-                    # If LMDB is read-only, report update to master; else write locally
+                    # Write locally when LMDB is writable. On a read-only (fleet) node there
+                    # is deliberately NO per-record write-back — results reach the master
+                    # BATCHED via the Arrow Flight do_put in batch_processor.py.
+                    #
+                    # This used to send one `dns_cache.report_update` Celery task per record
+                    # to a task that IS NOT IMPLEMENTED ANYWHERE (`dns_cache_tasks.py` was
+                    # never deployed to the fleet). On 2026-08-01 that produced 15,155,327
+                    # unconsumable messages / 17 GB in the broker, filled 193 G of disk with
+                    # failed-bgsave temp files and OOM-killed the master box. The worker log
+                    # had 3.96M `Received unregistered task` errors that nobody read, because
+                    # the reporter swallowed every failure in `except Exception: return False`.
+                    # Same shape as 327d9bc ("stop emitting per-batch deltas — the consumer
+                    # never existed"). Do not reintroduce a per-record write-back path.
                     try:
-                        if dns_lookup.is_lmdb_readonly():
-                            try:
-                                from kv.update_reporter import report_dns_update
-                                report_dns_update('A', domain, rcode_live, answers_live, ttl_live)
-                            except Exception:
-                                pass
-                        else:
+                        if not dns_lookup.is_lmdb_readonly():
                             await dns_lookup.check_changed_and_enqueue_update('A', domain, rcode_live, answers_live, ttl_live)
                     except Exception:
                         pass
@@ -490,14 +496,10 @@ async def fetch_domain(
                         a_ans = [str(x) for x in ans_a]
                         a_ttl = ttl_a
                         a_live = True
+                        # No per-record write-back on read-only nodes — see the note at the
+                        # first call site; the Flight do_put in batch_processor carries these.
                         try:
-                            if dns_lookup.is_lmdb_readonly():
-                                try:
-                                    from kv.update_reporter import report_dns_update
-                                    report_dns_update('A', host, r_a, ans_a, ttl_a)
-                                except Exception:
-                                    pass
-                            else:
+                            if not dns_lookup.is_lmdb_readonly():
                                 await dns_lookup.check_changed_and_enqueue_update('A', host, r_a, ans_a, ttl_a)
                         except Exception:
                             pass
@@ -954,15 +956,11 @@ async def fetch_domain(
                 if r_ptr != 'NOERROR' or not a_ptr:
                     return None
 
-                # Report PTR update to master or write locally
+                # Write PTR locally when LMDB is writable. No per-record write-back on
+                # read-only nodes — see the note at the first call site; `dns_cache.
+                # report_ptr_update` was as unimplemented as its A-record twin.
                 try:
-                    if dns_lookup.is_lmdb_readonly():
-                        try:
-                            from kv.update_reporter import report_ptr_update
-                            report_ptr_update(reverse_name, r_ptr, a_ptr, ttl_ptr)
-                        except Exception:
-                            pass
-                    else:
+                    if not dns_lookup.is_lmdb_readonly():
                         # Write directly to PTR LMDB if available
                         try:
                             dns_lookup.init_lmdb_ptr(ptr_dir or os.getenv('DNS_LMDB_PTR_DIR', '/mnt/shared/dns_lmdb_ptr'), readonly=True, lock=False)
