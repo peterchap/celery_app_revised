@@ -4,12 +4,57 @@ import dns.asyncresolver
 import os
 import pyarrow as pa
 import pyarrow.parquet as pq
+import re
 import traceback
 from dotenv import load_dotenv
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from .chunked_tld_processor import ChunkedTLDProcessor
 from .batch_processor import BatchProcessor
+
+# ============================================================
+# Stable output key
+#
+# WHY (2026-08-02): output filenames used to be built from `file_key` verbatim —
+# `safe_key = file_key.replace("/", "_")` — where file_key is "inprogress/<name>",
+# INCLUDING the .parquet extension. Retry output is `{safe_key}_..._retries.parquet`,
+# so every retry cycle re-wrapped the name:
+#
+#   A.parquet
+#   retry_1_inprogress_A.parquet_rest_chunk1_retries.parquet
+#   retry_2_inprogress_retry_1_inprogress_A.parquet_rest_chunk1_retries.parquet_...
+#
+# Two things broke as a result:
+#   * `celery_masterapp.get_retry_filename` SUMS every embedded `retry_N_` marker, so an
+#     accreted name scored 1, then 1+2=3, then +4=7 and was dumped to failed/ after about
+#     THREE real cycles instead of four attempts. 127,077 of the 159,783 files in failed/
+#     carry `retry_4_`.
+#   * names grew ~40 chars per cycle and hit the ext4 255-byte ceiling — the longest
+#     failed filename is 254 chars, with 10,214 over 240, at which point the next rename
+#     cannot fit at all.
+#
+# The key must therefore be IDEMPOTENT: normalising an already-normalised name is a no-op,
+# so a file processed N times produces the same output name every time.
+# ============================================================
+
+_KEY_SUFFIX = re.compile(r'(?:\.parquet|_initial_retries|_retries|_[a-z_]*chunk\d+)$')
+_KEY_PREFIX = re.compile(r'^(?:retry_\d+_|inprogress_)')
+
+
+def stable_base_key(file_key: str) -> str:
+    """Directory-, extension- and retry-marker-free stem used for OUTPUT filenames.
+
+    Idempotent by construction: strips accreted wrappers until the name stops changing,
+    so `stable_base_key(stable_base_key(x)) == stable_base_key(x)`.
+    """
+    name = Path(file_key).name
+    previous = None
+    while previous != name:
+        previous = name
+        name = _KEY_SUFFIX.sub('', name)
+        name = _KEY_PREFIX.sub('', name)
+    # Never return empty — a pathological name must still produce a usable key.
+    return name or Path(file_key).stem or "unnamed"
 from . import dns_lookup
 from .logger import configure_logging
 from .config import CONFIG
@@ -325,7 +370,7 @@ class DNSApplication:
         groups = self._group_domains_by_tld(domains)
 
         # Make a safe key for output prefixes used in chunked processing
-        safe_key = self.file_key.replace("/", "_")
+        safe_key = stable_base_key(self.file_key)
 
         # Check if chunked processing is enabled
         use_chunked = os.getenv("USE_CHUNKED_PROCESSING", "true").lower() == "true"
@@ -422,7 +467,7 @@ class DNSApplication:
                 app_logger.exception("Error during dns_lookup shutdown")
 
     async def _run_group(self, tld: str, group_domains: List[str], original_table: pa.Table, label: str):
-        safe_key = self.file_key.replace("/", "_")
+        safe_key = stable_base_key(self.file_key)
         # Pass shared semaphore and app_logger down to BatchProcessor so everything uses same settings
         is_prio = "prio_" in self.file_key.lower()
         bp = BatchProcessor(
