@@ -204,7 +204,17 @@ def _as_ips(answer: Iterable[Any]) -> List[str]:
 # --------------------------------------------------------------------
 # SMTP banner parsing and minimal provider inference
 # --------------------------------------------------------------------
-ROBUST_BANNER_REGEX = re.compile(r"^220\s+([\S]+)(?:\s+(?:E?SMTP)\s*(.*))?$", re.IGNORECASE)
+# Separator is `[-\s]`, not `\s`, as of 2026-08-20. RFC 5321 greetings come in two
+# forms: single-line `220 host ...` and MULTILINE `220-host ...` (every line but the last).
+# The old `^220\s+` accepted only the first, so every multiline-greeting server parsed to
+# (None, None) and its banner was discarded — provider/category inference then had nothing
+# to work with. Exim and cPanel announce this way routinely, so this was a whole class of
+# hosts, not an edge case. Note smtp_banner_fetcher.py keeps the first line matching
+# `startswith("220")`, which HAPPILY returns the `220-` line — the fetcher was collecting
+# these banners correctly all along and the parser was throwing them away.
+# Only the FIRST hyphen is the continuation marker, so hyphenated hostnames survive:
+# `220-vps-7ac26990.vps.ovh.us` -> `vps-7ac26990.vps.ovh.us`.
+ROBUST_BANNER_REGEX = re.compile(r"^220[-\s]\s*([\S]+)(?:\s+(?:E?SMTP)\s*(.*))?$", re.IGNORECASE)
 
 def parse_smtp_banner(banner: str) -> Tuple[Optional[str], Optional[str]]:
     """Return (announced_hostname, software_details) or (None, None)."""
