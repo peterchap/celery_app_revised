@@ -87,10 +87,12 @@ class DNSRecords:
     https_cert_issuer: str | None
     https_cert_san_count: int | None
 
-    # security.txt
-    has_security_txt: bool
-    security_txt_url: str
-    security_txt_preview: str
+    # security.txt — None means "not probed", NOT "absent". These are only
+    # populated when DNSFetcher(run_blocking_probes=True); the bulk corpus run
+    # leaves the probe off, and a falsy default there ships a false negative.
+    has_security_txt: bool | None
+    security_txt_url: str | None
+    security_txt_preview: str | None
 
     # --- SMTP banner (MX) ---
     mx_banner_raw: Optional[str]

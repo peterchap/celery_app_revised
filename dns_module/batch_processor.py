@@ -197,6 +197,19 @@ def _safe_serialize(obj):
     return str(obj)
 
 
+def _first_not_none(*vals):
+    """First value that is not None, else None.
+
+    Deliberately not `a or b or default`: for a field whose "off" state is None,
+    `or` collapses a legitimate False/0/"" into the next candidate and finally into
+    a falsy default, which is how an unrun probe came to publish a negative result.
+    """
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
 def _dnsrecord_to_row(rec: DNSRecord) -> Dict[str, Any]:
     """Convert DNSRecord to compact row — used for retries only."""
     try:
@@ -472,9 +485,12 @@ def _dnsrecord_to_expanded_row(rec: DNSRecord) -> Dict[str, Any]:
         "https_cert_san_count": getattr(rec, "https_cert_san_count", None) if getattr(rec, "https_cert_san_count", None) is not None else rd.get("https_cert_san_count"),
         "dnssec": bool(getattr(rec, "dnssec", False) or rd.get("dnssec") or False),
         "soa_serial": getattr(rec, "soa_serial", None) or meta.get("soa_serial"),
-        "has_security_txt": bool(getattr(rec, "has_security_txt", False) or rd.get("has_security_txt") or False),
-        "security_txt_url": getattr(rec, "security_txt_url", "") or rd.get("security_txt_url") or "",
-        "security_txt_preview": getattr(rec, "security_txt_preview", "") or rd.get("security_txt_preview") or "",
+        # NOT bool(...) — the security.txt probe only runs under run_blocking_probes,
+        # and coercing its None to False here republished "no security.txt" for every
+        # domain in the corpus. Absent stays absent; the Arrow fields are nullable.
+        "has_security_txt": _first_not_none(getattr(rec, "has_security_txt", None), rd.get("has_security_txt")),
+        "security_txt_url": _first_not_none(getattr(rec, "security_txt_url", None), rd.get("security_txt_url")),
+        "security_txt_preview": _first_not_none(getattr(rec, "security_txt_preview", None), rd.get("security_txt_preview")),
         "records_json": records_json,
         "errors_json": errors_json,
         "meta_json": meta_json,
