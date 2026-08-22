@@ -1468,7 +1468,10 @@ class DNSFetcher:
                 tlsrpt_rua = ""
 
             # Security.txt probe
-            sec_txt_ok, sec_txt_url, sec_txt_preview = False, "", ""
+            # None, not False: the probe is off in the bulk corpus run, and False
+            # here would assert "this domain publishes no security.txt" on the
+            # strength of never having looked.
+            sec_txt_ok, sec_txt_url, sec_txt_preview = None, None, None
             if self._run_blocking_probes and registered:
                 try:
                     sec_txt_ok, sec_txt_url, sec_txt_preview = await probe_security_txt(registered, probe_timeout=5.0)
@@ -1569,7 +1572,9 @@ class DNSFetcher:
                     mail_cname = ""
 
             # Derived/aggregate values
-            https_san_count = len(https_san.split("|")) if (isinstance(https_san, str) and https_san) else 0
+            # None, not 0 — "0 SANs" is a measurement, and we have not taken one
+            # unless the probe ran and returned a SAN list.
+            https_san_count = len(https_san.split("|")) if (isinstance(https_san, str) and https_san) else None
             ip_int = ip_to_int(a_list[0]) if a_list else 0
             a_ttl = expanded.get("ttl", 0) or 0
             ns1_list = ns_list if isinstance(ns_list, list) else ([ns_list] if ns_list else [])
@@ -1830,7 +1835,7 @@ class DNSFetcher:
                                 rec.https_cert_days_left = https_days
                                 rec.https_cert_issuer = https_issuer or ""
                                 rec.https_cert_san_count = (
-                                    len(https_san.split("|")) if (isinstance(https_san, str) and https_san) else 0
+                                    len(https_san.split("|")) if (isinstance(https_san, str) and https_san) else None
                                 )
                             except Exception:
                                 pass
@@ -2111,7 +2116,7 @@ class DNSFetcher:
             https_cert_ok=https_ok,
             https_cert_days_left=https_days,
             https_cert_issuer=https_issuer or "",
-            https_cert_san_count=(len(https_san.split("|")) if (isinstance(https_san, str) and https_san) else 0),
+            https_cert_san_count=(len(https_san.split("|")) if (isinstance(https_san, str) and https_san) else None),
             has_security_txt=sec_txt_ok,
             security_txt_url=sec_txt_url,
             security_txt_preview=sec_txt_preview,
@@ -2168,7 +2173,8 @@ class DNSFetcher:
         tlsrpt_rua = ""
         https_ok = https_days = https_issuer = https_san = None
         smtp_ok = smtp_days = smtp_issuer = None
-        sec_txt_ok, sec_txt_url, sec_txt_preview = False, "", ""
+        # None, not False — see the note in the sibling path above.
+        sec_txt_ok, sec_txt_url, sec_txt_preview = None, None, None
 
         if host_input:
             try:
