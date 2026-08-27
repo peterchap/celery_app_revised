@@ -451,6 +451,18 @@ async def fetch_domain(
                 record.records['a'] = [str(x) for x in a_answers]
             except Exception:
                 record.records['a'] = a_answers
+            # Alias the A lookup already resolved through, read from cache — no query.
+            # in-memory only: a CNAME cannot legally coexist with the SOA and NS an apex
+            # must have, so this misses ~always, and an LMDB fallback would spend a
+            # semaphore and a thread hop per domain across the whole corpus to confirm it.
+            # Kept rather than dropped because an apex that DOES answer CNAME is a
+            # misconfiguration worth seeing. www_cname below is where the signal is.
+            try:
+                apex_cname = await dns_lookup.peek_cname(domain, use_lmdb=False)
+                if apex_cname:
+                    record.records['cname'] = apex_cname
+            except Exception:
+                pass
         else:
             record.errors['A'] = a_rcode
 
@@ -1052,10 +1064,26 @@ async def fetch_domain(
         www_records, mail_records = await asyncio.gather(
             _check_sub(www_domain), _check_sub(mail_domain), return_exceptions=True
         )
+        # www/mail aliases come from the A lookups _check_sub just made — peek_cname reads
+        # the cache and never queries, so these two fields are free. www_cname is the leg
+        # gold.dns_wide.cname_record actually coalesces onto: CNAME'd www is common where
+        # apex CNAME is illegal.
         if not isinstance(www_records, BaseException) and www_records:
             record.records['www'] = www_records
+            try:
+                www_cname = await dns_lookup.peek_cname(www_domain)
+                if www_cname:
+                    record.records['www_cname'] = www_cname
+            except Exception:
+                pass
         if not isinstance(mail_records, BaseException) and mail_records:
             record.records['mail'] = mail_records
+            try:
+                mail_cname = await dns_lookup.peek_cname(mail_domain)
+                if mail_cname:
+                    record.records['mail_cname'] = mail_cname
+            except Exception:
+                pass
 
         # Cache-backfill: use LMDB cached answers when live lookups returned
         # empty. NOTE: this was previously indented inside the "mail exists"
@@ -1244,7 +1272,7 @@ class DNSFetcher:
                 exp_map["ttl"] = meta.get("a_ttl") or meta.get("ttl") or 0
                 # optional datasets used later
                 exp_map["txt"] = recs.get("TXT") or []
-                exp_map["cname"] = recs.get("CNAME") or ""
+                exp_map["cname"] = recs.get("cname") or recs.get("CNAME") or ""
                 exp_map["caa"] = recs.get("CAA") or []
                 exp_map["naptr"] = recs.get("NAPTR") or []
                 exp_map["srv"] = recs.get("SRV") or []

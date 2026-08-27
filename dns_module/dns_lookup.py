@@ -208,6 +208,72 @@ def _cache_key(rtype: str, name: str) -> str:
     return f"{rtype.upper()}:{name.lower()}"
 
 
+def _extract_cname(answer: Any, name: str) -> Optional[str]:
+    """First-hop CNAME target from an A/AAAA answer, or None if the name is not aliased.
+
+    The resolver follows the CNAME chain for us, so the CNAME rrset arrives in the SAME
+    response as the address records. Iterating a dnspython Answer yields only
+    `answer.rrset` — the final (address) rrset — so the alias is present in the response
+    object and invisible to every caller. This reads it off `response.answer` instead,
+    which is why CNAME capture costs no additional query.
+
+    First hop, not `answer.canonical_name`: for a -> b -> c we want b (what this name
+    points at), not c (where the chain bottoms out).
+    """
+    try:
+        resp = getattr(answer, "response", None)
+        if resp is None:
+            return None
+        want = name.rstrip('.').lower()
+        for rrset in (getattr(resp, "answer", None) or []):
+            if rrset.rdtype != dns.rdatatype.CNAME:
+                continue
+            if str(rrset.name).rstrip('.').lower() != want:
+                continue
+            for rdata in rrset:
+                target = str(getattr(rdata, "target", rdata)).rstrip('.').lower()
+                return target or None
+        return None
+    except Exception:
+        return None
+
+
+async def peek_cname(name: str, use_lmdb: bool = True) -> str:
+    """Cached CNAME for `name`, or "" — NEVER issues a query.
+
+    Populated as a side effect of the A lookup (see `_extract_cname`), so this is a
+    read of something already paid for. A miss means "no alias seen", which for a name
+    whose A lookup ran in this process or a previous crawl means "not aliased"; for a
+    name never resolved it means "not looked at". Deliberately not a `perform_lookup`
+    call — that would fall through to a live CNAME query on a cache miss and turn a
+    free field into 395M extra queries.
+
+    `use_lmdb=False` restricts the read to the in-process cache. Pass it for names that
+    are ~never aliased — an apex, where a CNAME cannot legally coexist with the SOA and
+    NS — because there the LMDB fallback is a guaranteed miss that still costs a
+    semaphore and a thread hop, once per domain, over the whole corpus. In-memory is
+    sufficient there anyway: if `_do_lookup` ran for this name in this process the alias
+    is in `_inmem_cache`, and if it did not there is nothing to find.
+    """
+    try:
+        key = _cache_key('CNAME', name)
+        cached = _get_from_inmem_cache(key)
+        if cached is None and use_lmdb and not _cache_disabled():
+            lmdb_result = await _read_from_lmdb(key)
+            if lmdb_result is not None:
+                rcode, answers, ttl, timestamp = lmdb_result
+                if (time.time() - timestamp) < ttl:
+                    cached = (rcode, answers, ttl)
+        if not cached:
+            return ""
+        rcode, answers, _ttl = cached
+        if rcode != 'NOERROR' or not answers:
+            return ""
+        return str(answers[0])
+    except Exception:
+        return ""
+
+
 def _serialize_value(rcode: str, answers: List[str], ttl: int) -> bytes:
     raw = pickle.dumps((rcode, answers, ttl, time.time()))
     try:
@@ -831,6 +897,18 @@ async def _do_lookup(
             ttl_raw = int(answer.rrset.ttl) if answer.rrset else POSITIVE_MIN_TTL_SECONDS
             ttl = max(POSITIVE_MIN_TTL_SECONDS, ttl_raw)
             ttl = _min_ttl_for_type(rtype, ttl)
+
+            # Keep the alias the resolver has already told us about, under its own cache
+            # key, so peek_cname() can read it without a query. A only: an AAAA answer for
+            # the same name carries the same chain and would just overwrite this.
+            if rtype == 'A':
+                cname_target = _extract_cname(answer, name)
+                if cname_target:
+                    ckey = _cache_key('CNAME', name)
+                    _put_in_inmem_cache(ckey, 'NOERROR', [cname_target], ttl)
+                    if _cache_enabled_for_type('CNAME') and not _cache_disabled():
+                        await _write_to_lmdb(ckey, 'NOERROR', [cname_target], ttl)
+
             return 'NOERROR', answers, ttl
 
         except dns.resolver.NXDOMAIN:
