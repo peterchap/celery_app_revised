@@ -251,6 +251,42 @@ class DNSLookup:
         """
         return await fetch_domain(domain, resolver=self.resolver, semaphore=self.semaphore, retry_limit=retry_limit)
 
+def unpack_host_record(
+    records: Dict[str, Any],
+    prefix: str,
+    fqdn: str,
+    sub: Dict[str, Any],
+    ptr_map: Optional[Dict[str, str]] = None,
+) -> None:
+    """Lift a www/mail sub-record into the flat columns the row builder actually reads.
+
+    `_check_sub` returns {'A': [...], 'AAAA': [...]}, and that dict used to be stored
+    whole under records[prefix] — while the row builder looked for prefix_a / prefix_int /
+    prefix_ptr, keys nothing ever set. So `www` shipped a Python repr
+    ("{'A': ['1.2.3.4'], ...}") on ~88% of rows, reading as populated to any
+    `nullif(trim(x),'')` check, with its three real columns at 0.000% beside it. Measured
+    2026-08-27 over 44,640 bronze rows; see the bronze capture census.
+
+    Everything here is already paid for. The addresses came from `_check_sub`'s own A
+    lookup, and the PTR is READ FROM `ptr_map` rather than resolved — a www host usually
+    shares the apex IP so it is usually present, and when it is not the field stays empty
+    rather than costing a reverse lookup per domain across the corpus.
+    """
+    a_list = [str(x) for x in (sub.get('A') or []) if x]
+    if not a_list:
+        return
+    records[f'{prefix}_a'] = a_list
+    try:
+        records[f'{prefix}_int'] = ip_to_int(a_list[0])
+    except Exception:
+        pass
+    ptr_val = (ptr_map or {}).get(a_list[0])
+    if ptr_val:
+        records[f'{prefix}_ptr'] = ptr_val
+    # The bare column becomes the hostname it is named for, not a dict repr.
+    records[prefix] = fqdn
+
+
 async def fetch_domain(
     domain: str,
     resolver: Optional[Any] = None,
@@ -860,6 +896,13 @@ async def fetch_domain(
                         record.records['mta_sts_mode'] = pol["mode"]
                     if pol.get("max_age") is not None:
                         record.records['mta_sts_max_age'] = pol["max_age"]
+                    # The hosts the policy permits, and whether the policy was served
+                    # over a certificate a conforming sender would accept. Both come
+                    # from the fetch above — no additional request.
+                    if pol.get("mx"):
+                        record.records['mta_sts_mx'] = pol["mx"]
+                    if pol.get("tls_ok") is not None:
+                        record.records['mta_sts_policy_tls_ok'] = bool(pol["tls_ok"])
                 except Exception:
                     pass
             tlsrpt_v = _first_txt(auth_results[2], "v=tlsrptv1")
@@ -1066,10 +1109,10 @@ async def fetch_domain(
         )
         # www/mail aliases come from the A lookups _check_sub just made — peek_cname reads
         # the cache and never queries, so these two fields are free. www_cname is the leg
-        # gold.dns_wide.cname_record actually coalesces onto: CNAME'd www is common where
+        # gold.dns_wide.cname_record used to coalesce onto: CNAME'd www is common where
         # apex CNAME is illegal.
         if not isinstance(www_records, BaseException) and www_records:
-            record.records['www'] = www_records
+            unpack_host_record(record.records, 'www', www_domain, www_records, ptr_map)
             try:
                 www_cname = await dns_lookup.peek_cname(www_domain)
                 if www_cname:
@@ -1077,7 +1120,7 @@ async def fetch_domain(
             except Exception:
                 pass
         if not isinstance(mail_records, BaseException) and mail_records:
-            record.records['mail'] = mail_records
+            unpack_host_record(record.records, 'mail', mail_domain, mail_records, ptr_map)
             try:
                 mail_cname = await dns_lookup.peek_cname(mail_domain)
                 if mail_cname:

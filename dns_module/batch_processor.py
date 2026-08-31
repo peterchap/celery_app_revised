@@ -475,6 +475,14 @@ def _dnsrecord_to_expanded_row(rec: DNSRecord) -> Dict[str, Any]:
         "mta_sts_mode": getattr(rec, "mta_sts_mode", "") or rd.get("mta_sts_mode") or "",
         "mta_sts_max_age": getattr(rec, "mta_sts_max_age", None) or rd.get("mta_sts_max_age"),
         "mta_sts_id": getattr(rec, "mta_sts_id", "") or rd.get("mta_sts_id") or "",
+        # The hosts the policy permits. Compare against mx_records to catch a domain in
+        # `enforce` whose policy omits its own MX — conforming senders refuse that mail.
+        "mta_sts_mx": _join_list(g("mta_sts_mx")),
+        # _first_not_none, not `or`: False here is the whole finding (a policy served
+        # behind a certificate no conforming sender accepts), and `or` would collapse it
+        # into "not fetched".
+        "mta_sts_policy_tls_ok": _first_not_none(
+            getattr(rec, "mta_sts_policy_tls_ok", None), rd.get("mta_sts_policy_tls_ok")),
         "tlsrpt_rua": getattr(rec, "tlsrpt_rua", "") or rd.get("tlsrpt_rua") or "",
         "smtp_cert_ok": getattr(rec, "smtp_cert_ok", None) if getattr(rec, "smtp_cert_ok", None) is not None else rd.get("smtp_cert_ok"),
         "smtp_cert_days_left": getattr(rec, "smtp_cert_days_left", None) if getattr(rec, "smtp_cert_days_left", None) is not None else rd.get("smtp_cert_days_left"),
@@ -589,6 +597,8 @@ def get_dns_expanded_schema():
         pa.field("mta_sts_mode", pa.string()),
         pa.field("mta_sts_max_age", pa.int64()),
         pa.field("mta_sts_id", pa.string()),
+        pa.field("mta_sts_mx", pa.string()),
+        pa.field("mta_sts_policy_tls_ok", pa.bool_()),
         pa.field("tlsrpt_rua", pa.string()),
         pa.field("smtp_cert_ok", pa.bool_()),
         pa.field("smtp_cert_days_left", pa.int32()),
@@ -1007,7 +1017,8 @@ class BatchProcessor:
                         "mail_spf": "", "mail_dmarc": "", "mx_banner_raw": "", 
                         "mx_banner_host": "", "mx_banner_details": "", "mx_banner_provider": "", 
                         "mx_banner_category": "", "has_mta_sts": False, "mta_sts_txt": "", 
-                        "mta_sts_mode": "", "mta_sts_max_age": None, "mta_sts_id": "", 
+                        "mta_sts_mode": "", "mta_sts_max_age": None, "mta_sts_id": "",
+                        "mta_sts_mx": "", "mta_sts_policy_tls_ok": None, 
                         "tlsrpt_rua": "", "smtp_cert_ok": None, "smtp_cert_days_left": None, 
                         "smtp_cert_issuer": "", "https_cert_ok": None, "https_cert_days_left": None, 
                         "https_cert_issuer": "", "https_cert_san_count": None, "dnssec": False, 
