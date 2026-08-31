@@ -896,6 +896,13 @@ async def fetch_domain(
                         record.records['mta_sts_mode'] = pol["mode"]
                     if pol.get("max_age") is not None:
                         record.records['mta_sts_max_age'] = pol["max_age"]
+                    # The hosts the policy permits, and whether the policy was served
+                    # over a certificate a conforming sender would accept. Both come
+                    # from the fetch above — no additional request.
+                    if pol.get("mx"):
+                        record.records['mta_sts_mx'] = pol["mx"]
+                    if pol.get("tls_ok") is not None:
+                        record.records['mta_sts_policy_tls_ok'] = bool(pol["tls_ok"])
                 except Exception:
                     pass
             tlsrpt_v = _first_txt(auth_results[2], "v=tlsrptv1")
