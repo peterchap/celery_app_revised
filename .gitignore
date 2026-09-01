@@ -1,0 +1,38 @@
+# Python bytecode.
+#
+# ⚠️ These were TRACKED until 2026-09-01 — 40 .pyc files under dns_module/ and kv/, the two
+# packages this repo ships. That is why `various updates` (fdb35f0) could be a commit
+# containing nothing but bytecode: running the test suite dirtied the working tree and the
+# artifacts were committed without anyone intending to.
+#
+# It matters more here than in an application repo, because this package ships BY TAG
+# (`datazag-dns-module @ git+ssh://…@dns-module-v<N>`). A consumer installing a tag pulled
+# whatever .pyc happened to be committed next to the source, with no guarantee the two
+# agreed — stale bytecode beside fixed source is a silent way to ship the old behaviour.
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Packaging artefacts
+build/
+dist/
+*.egg-info/
+
+# Virtualenvs
+.venv/
+venv/
+
+# ⚠️ DELIBERATELY NOT IGNORING `.env`. Two are tracked on purpose — `.env` and
+# `dns_module/.env` — and they hold deployment TUNING, not secrets: nameserver lists, QPS and
+# semaphore limits, timeouts, LMDB/lookup paths, feature flags, the Flight URL. Adding the
+# usual `.env` rule here would not untrack them (ignore rules do not apply to tracked files),
+# it would only make a future reader think they were protected when they are not. If a
+# credential ever needs to live in this repo, that decision should be made deliberately and
+# this comment revisited — not inherited from a boilerplate ignore file.
