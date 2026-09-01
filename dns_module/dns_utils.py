@@ -214,17 +214,71 @@ def _as_ips(answer: Iterable[Any]) -> List[str]:
 # these banners correctly all along and the parser was throwing them away.
 # Only the FIRST hyphen is the continuation marker, so hyphenated hostnames survive:
 # `220-vps-7ac26990.vps.ovh.us` -> `vps-7ac26990.vps.ovh.us`.
-ROBUST_BANNER_REGEX = re.compile(r"^220[-\s]\s*([\S]+)(?:\s+(?:E?SMTP)\s*(.*))?$", re.IGNORECASE)
+#
+# 🚨 SECOND DEFECT, FIXED 2026-09-01 — same regex, different bug, and this one was silent.
+# The old pattern ended `(?:\s+(?:E?SMTP)\s*(.*))?$`: the `$` anchor combined with requiring
+# the token AFTER the hostname to be literally `(E)SMTP`. Any greeting with other words in
+# between failed the WHOLE match and yielded no hostname at all — not a missing detail, a
+# missing host:
+#     220 dedi1257.your-server.de Exim ESMTP Service ready
+#     220 pepi1mx-mfepd01.ad.aruba.it Aruba Mail Xchanger ESMTP server ready
+#     220 WonkExch1.bizwonkhq.local Microsoft ESMTP MAIL Service ready at ...
+# Measured by replaying a 2,500-host probe of vanity MX hosts (2026-09-01) through the old
+# and new parsers: 133 hosts and 15 distinct operators recovered — 8.1pp of everything that
+# answered. Attribution of the probed sample went 79.6% -> 87.7% on this fix alone.
+# ⚠️ The single largest operator in that sample, `aruba.it` (107 hosts — more than Bluehost),
+# was invisible to the old parser ENTIRELY. Its greeting is
+# `220 pepi1mx-mfepd01.ad.aruba.it Aruba Mail Xchanger ESMTP server ready`: three words
+# between the hostname and the marker, so the whole match failed and it looked like a server
+# that sent no banner. A defect that hides the biggest thing in the data is the expensive
+# kind, because the gap it leaves is silent.
+#
+# The host now simply captures the rest of the line, and the `(E)SMTP` marker is removed in
+# code instead of being load-bearing structure. That also PRESERVES software names printed
+# BEFORE the marker (`Exim`, `Microsoft` above), which the old capture discarded by
+# construction — it could only ever see text to the right of `(E)SMTP`.
+#
+# ⚠️ THE HOST MUST START ALPHANUMERIC, and that guard is load-bearing. `220 - host.example
+# ESMTP` is required to parse to nothing (a detached hyphen is not a continuation marker —
+# see test_widened_separator_did_not_open_false_positives). The old pattern rejected it only
+# as a SIDE EFFECT of the `$`+ESMTP requirement; dropping that anchor without this guard
+# would have happily parsed the bare `-` as the hostname. Removing `[A-Za-z0-9]` reopens it.
+ROBUST_BANNER_REGEX = re.compile(r"^220[-\s]\s*([A-Za-z0-9][\S]*)(?:\s+(.*))?$", re.IGNORECASE)
+
+# Word-bounded on purpose: `OpenSMTPD` and `ESMTPS` must NOT lose a chunk to this, so the
+# marker is only stripped when it stands as its own token.
+_ESMTP_MARKER = re.compile(r"\bE?SMTP\b", re.IGNORECASE)
+
+# ⚠️ Added with the 2026-09-01 fix to close a regression that fix would otherwise introduce.
+# Letting the host capture run to the first space means a greeting that opens with PROSE
+# rather than a hostname now yields its first word as the "hostname":
+#     "220-Welcome, please wait..."   ->  host "Welcome,"
+# The old pattern returned nothing there (correctly) only because it also demanded `(E)SMTP`.
+# Turning "no hostname" into "a hostname that is not one" is worse than either — a downstream
+# consumer cannot tell it apart from a real announcement. A hostname is letters, digits, dots
+# and hyphens; anything else means we did not parse a hostname, so say so.
+_HOSTNAME_CHARS = re.compile(r"^[A-Za-z0-9.-]+$")
 
 def parse_smtp_banner(banner: str) -> Tuple[Optional[str], Optional[str]]:
-    """Return (announced_hostname, software_details) or (None, None)."""
+    """Return (announced_hostname, software_details) or (None, None).
+
+    `details` is everything after the hostname with the `(E)SMTP` marker token removed, so
+    software announced on EITHER side of the marker survives:
+      "220 mail.foo.com ESMTP Postfix"                  -> ("mail.foo.com", "Postfix")
+      "220 dedi1257.your-server.de Exim ESMTP Service"  -> ("dedi1257.your-server.de",
+                                                            "Exim Service")
+    """
     if not banner:
         return None, None
     m = ROBUST_BANNER_REGEX.match(banner.strip())
     if not m:
         return None, None
-    host, details = m.groups()
-    return (host or "").strip(), (details or "").strip()
+    host, rest = m.groups()
+    host = (host or "").strip()
+    if not _HOSTNAME_CHARS.match(host):
+        return None, None
+    details = _ESMTP_MARKER.sub(" ", rest or "", count=1)
+    return host, " ".join(details.split())
 
 
 # High-precision hints (keep tiny here; put the big rules in provider tables)
