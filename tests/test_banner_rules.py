@@ -86,8 +86,13 @@ def test_no_risk_bias_on_software_only_rule():
 # vocabularies drift, which it cannot do if it imports the value it is checking against.
 LAKE_VALID_MBP_CATEGORIES = {
     "Mailbox Provider", "Hosting Mailbox", "Security Gateway",
-    "Transactional", "Self-hosted MTA", "unknown",
+    "Transactional", "Self-hosted MTA", "Parking", "unknown",
 }
+# `Parking` added 2026-09-02 (dnsproject: mbp_category adds Parking). Nothing here emits it —
+# a banner cannot tell you a domain is parked — so no rule or mapping changes. It is mirrored
+# only so this constant stays a faithful copy of the lake's VALID set, which is the one job it
+# has: the assertions below are subset checks, so an incomplete mirror fails to catch drift
+# rather than failing loudly.
 
 
 def test_every_rule_category_maps_to_a_valid_lake_category():
