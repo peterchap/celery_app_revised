@@ -36,3 +36,9 @@ venv/
 # it would only make a future reader think they were protected when they are not. If a
 # credential ever needs to live in this repo, that decision should be made deliberately and
 # this comment revisited — not inherited from a boilerplate ignore file.
+
+# Local configuration, never committed. Both .env files here were tracked and
+# pushed; they held no credentials, only FLIGHT_SERVER_URL and local settings —
+# but a tracked .env is a loaded gun the day somebody adds a key to it.
+.env
+**/.env
