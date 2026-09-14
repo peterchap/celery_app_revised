@@ -58,6 +58,22 @@ task_reject_on_worker_lost = True
 worker_prefetch_multiplier = 1
 
 # ============================================================
+# Child recycling
+# worker_max_tasks_per_child  — replace the pool child after N tasks.
+#
+# Without it the child lived until the worker restarted. On 2026-09-07
+# a soft-time-limit signal left .62's child marked as running an event
+# loop; every later task in that process failed in milliseconds, so it
+# took most tasks off the shared queues for four days (119,371 failures,
+# ~44M refresh lookups to failed/). loop_guard.py fixes that case; this
+# caps ANY unknown poisoned-child state at N-1 bad tasks.
+# 10 rather than 1: sub-second priority tasks would otherwise pay a fork
+# each, and 9 instant failures is seconds of damage, not days.
+# ============================================================
+
+worker_max_tasks_per_child = int(os.getenv("CELERY_MAX_TASKS_PER_CHILD", "10"))
+
+# ============================================================
 # Monitoring — emit task events so Flower's task view shows the
 # fleet's work (equivalent to starting workers with -E)
 # ============================================================
