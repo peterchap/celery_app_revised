@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -13,6 +12,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 
 from celery_app import app
 from dns_module.dns_application import DNSApplication
+from loop_guard import run_coroutine
 
 # ============================================================
 # Paths
@@ -119,7 +119,10 @@ def process_file(file: str) -> dict[str, Any]:
             input_directory="/mnt/shared/",
             output_directory="/mnt/shared/results/",
         )
-        asyncio.run(run_dns_task(dns_app_instance, f"inprogress/{filename}"))
+        # Not asyncio.run(): a soft-time-limit signal landing inside run_forever's setup
+        # left .62 marked as running a loop, and every later task in that process failed
+        # instantly (2026-09-07..09-11). See loop_guard.py.
+        run_coroutine(lambda: run_dns_task(dns_app_instance, f"inprogress/{filename}"))
 
         if input_path.exists():
             processed_path = move_to_processed(input_path)
