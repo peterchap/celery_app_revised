@@ -10,6 +10,7 @@ from typing import Any
 
 from celery.exceptions import SoftTimeLimitExceeded
 
+import cname_resolver
 from celery_app import app
 from dns_module.dns_application import DNSApplication
 from loop_guard import run_coroutine
@@ -187,6 +188,74 @@ def process_file_new_domain(file: str) -> dict[str, Any]:
     but routed through new_domain_queue for prioritisation.
     """
     return process_file(file)
+
+
+# ============================================================
+# cname_queue: CNAME + A resolution of certstream subdomains, on a SEPARATE path.
+# Design: datazag-pipeline/work/subdomain-cname-worker-path.md. It uses its own folders
+# (cname_inprogress/, cname_done/, cname_failed/) and NEVER inprogress/ or retries/. The master's
+# orphan reconciler and retry sweep re-enqueue anything in those folders onto retry_queue, i.e.
+# into DNSApplication and the lake. Results go to Flight dataset cname_resolution, which the
+# master lands outside DuckLake.
+# ============================================================
+
+CNAME_IN_PROGRESS_FOLDER = ROOT / "cname_inprogress"
+CNAME_DONE_FOLDER = ROOT / "cname_done"
+CNAME_FAILED_FOLDER = ROOT / "cname_failed"
+CNAME_RESULTS_FOLDER = ROOT / "cname_results"   # fallback only; nothing ingests it
+CNAME_QPS = float(os.getenv("CNAME_QPS", "40"))
+
+for p in [CNAME_IN_PROGRESS_FOLDER, CNAME_DONE_FOLDER, CNAME_FAILED_FOLDER, CNAME_RESULTS_FOLDER]:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def _send_cname_results(table, filename: str) -> str:
+    """Flight to the master, else a local parquet the operator re-sends. Returns where it went."""
+    import pyarrow.parquet as pq
+
+    url = os.getenv("FLIGHT_SERVER_URL", "").strip()
+    if url:
+        import pyarrow.flight as flight
+        try:
+            client = flight.FlightClient(url)
+            try:
+                writer, _ = client.do_put(flight.FlightDescriptor.for_path(cname_resolver.DATASET), table.schema)
+                writer.write_table(table)
+                writer.close()
+            finally:
+                client.close()
+            return url
+        except Exception as e:
+            log.error("cname Flight send failed for %s: %s. Writing local parquet instead.", filename, e)
+    out = CNAME_RESULTS_FOLDER / f"{Path(filename).stem}.parquet"
+    pq.write_table(table, str(out))
+    return str(out)
+
+
+# 5,000 hosts at 40 qps is ~125 s; the limits leave room for retries and a slow resolver while
+# keeping one file short enough that this queue never holds a worker for long.
+@app.task(name="task.resolve_cnames", acks_late=True, soft_time_limit=900, time_limit=960)
+def resolve_cnames(file: str) -> dict[str, Any]:
+    filename = Path(file).name
+    input_path = CNAME_IN_PROGRESS_FOLDER / filename
+    log.info("Starting cname task for file=%s qps=%s", filename, CNAME_QPS)
+    try:
+        hosts = cname_resolver.read_hosts(input_path)
+        rows = run_coroutine(lambda: cname_resolver.resolve_hosts(hosts, qps=CNAME_QPS))
+        table = cname_resolver.to_table(rows, source_file=filename)
+        sent_to = _send_cname_results(table, filename)
+        shutil.move(str(input_path), str(CNAME_DONE_FOLDER / filename))
+        payload = {"status": "success", "file": filename, "hosts": len(hosts),
+                   "with_cname": sum(1 for r in rows if r["cnames"]),
+                   "worker": socket.gethostname(), "sent_to": sent_to}
+        log.info("cname task done: %s", payload)
+        return payload
+    except BaseException as e:
+        # Includes SoftTimeLimitExceeded. Always cname_failed/, never retries/ (see above).
+        log.exception("cname task failed for file=%s: %r", filename, e)
+        if input_path.exists():
+            shutil.move(str(input_path), str(CNAME_FAILED_FOLDER / filename))
+        raise
 
 
 @app.task(name="task.process_file_retry", acks_late=True, soft_time_limit=7200, time_limit=7500)

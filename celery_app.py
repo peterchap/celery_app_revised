@@ -21,6 +21,7 @@ priority_exchange   = Exchange("priority_exchange",   type="direct", durable=Tru
 new_domain_exchange = Exchange("new_domain_exchange", type="direct", durable=True)
 retry_exchange      = Exchange("retry_exchange",      type="direct", durable=True)
 standard_exchange   = Exchange("standard_exchange",   type="direct", durable=True)
+cname_exchange      = Exchange("cname_exchange",      type="direct", durable=True)
 
 # ============================================================
 # Queues
@@ -36,6 +37,11 @@ app.conf.task_queues = [
     Queue("new_domain_queue", exchange=new_domain_exchange, routing_key="new_domain_queue", durable=True),
     Queue("retry_queue",      exchange=retry_exchange,      routing_key="retry_queue",       durable=True),
     Queue("standard_queue",   exchange=standard_exchange,   routing_key="standard_queue",    durable=True),
+    # CNAME + A resolution of certstream subdomains, results kept OUT of the lake. Consumed only by
+    # the workers whose CELERY_QUEUES includes it (a systemd drop-in on a subset), because Redis
+    # polls a worker's queues round-robin and would otherwise give it an equal share of every
+    # worker. See task.resolve_cnames and datazag-pipeline/work/subdomain-cname-worker-path.md.
+    Queue("cname_queue",      exchange=cname_exchange,      routing_key="cname_queue",       durable=True),
 ]
 
 # ============================================================
@@ -47,6 +53,7 @@ app.conf.task_routes = {
     "task.process_file_new_domain": {"queue": "new_domain_queue", "routing_key": "new_domain_queue"},
     "task.process_file_retry":      {"queue": "retry_queue",      "routing_key": "retry_queue"},
     "task.process_file":            {"queue": "standard_queue",   "routing_key": "standard_queue"},
+    "task.resolve_cnames":          {"queue": "cname_queue",      "routing_key": "cname_queue"},
 }
 
 app.conf.task_default_queue         = "standard_queue"
