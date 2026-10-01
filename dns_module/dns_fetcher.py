@@ -1314,12 +1314,22 @@ class DNSFetcher:
                 exp_map["status"] = (rec_obj.status or "")
                 exp_map["ttl"] = meta.get("a_ttl") or meta.get("ttl") or 0
                 # optional datasets used later
-                exp_map["txt"] = recs.get("TXT") or []
+                exp_map["txt"] = recs.get("txt") or recs.get("TXT") or []
                 exp_map["cname"] = recs.get("cname") or recs.get("CNAME") or ""
-                exp_map["caa"] = recs.get("CAA") or []
+                exp_map["caa"] = recs.get("caa") or recs.get("CAA") or []
                 exp_map["naptr"] = recs.get("NAPTR") or []
                 exp_map["srv"] = recs.get("SRV") or []
-                exp_map["dnskey"] = meta.get("dnssec") or False
+                exp_map["dnskey"] = recs.get("dnssec") or meta.get("dnssec") or False
+                # Already collected by fetch_domain (auth batch, ~880-915). Carried
+                # through so the phase below does not query them a second time,
+                # which also fetched the MTA-STS policy twice and pushed domains
+                # that publish MTA-STS past the overall timeout.
+                exp_map["has_mta_sts"] = bool(recs.get("has_mta_sts"))
+                exp_map["mta_sts_txt"] = recs.get("mta_sts_txt") or ""
+                exp_map["mta_sts_mode"] = recs.get("mta_sts_mode") or ""
+                exp_map["mta_sts_max_age"] = recs.get("mta_sts_max_age")
+                exp_map["mta_sts_id"] = recs.get("mta_sts_id") or ""
+                exp_map["tlsrpt_rua"] = recs.get("tlsrpt_rua") or ""
                 # expose SOA serial from meta, if available
                 try:
                     exp_map["soa_serial"] = meta.get("soa_serial")
@@ -1518,25 +1528,31 @@ class DNSFetcher:
             except Exception:
                 spf_txt = dmarc_txt = bimi_txt = ""
 
-            # MTA-STS and TLS-RPT using existing helpers
-            try:
-                mta_info = await detect_mta_sts(registered, self.lookup, fetch_policy=self._fetch_mta_sts_policy)
-                has_mta_sts = bool(mta_info.get("has_mta_sts"))
-                mta_sts_txt = mta_info.get("raw_txt") or ""
-                mta_sts_mode = mta_info.get("mode") or ""
-                mta_sts_max_age = mta_info.get("max_age")
-                mta_sts_id = mta_info.get("id") or ""
-            except Exception:
-                has_mta_sts = False
-                mta_sts_txt = ""
-                mta_sts_mode = ""
-                mta_sts_max_age = None
-                mta_sts_id = ""
+            # MTA-STS and TLS-RPT: reuse what fetch_domain already collected; only
+            # query again when it found nothing (its auth batch can miss on a
+            # transient failure, and a re-query is the cheap second chance).
+            has_mta_sts = bool(exp_map.get("has_mta_sts"))
+            mta_sts_txt = exp_map.get("mta_sts_txt") or ""
+            mta_sts_mode = exp_map.get("mta_sts_mode") or ""
+            mta_sts_max_age = exp_map.get("mta_sts_max_age")
+            mta_sts_id = exp_map.get("mta_sts_id") or ""
+            if not has_mta_sts:
+                try:
+                    mta_info = await detect_mta_sts(registered, self.lookup, fetch_policy=self._fetch_mta_sts_policy)
+                    has_mta_sts = bool(mta_info.get("has_mta_sts"))
+                    mta_sts_txt = mta_info.get("raw_txt") or ""
+                    mta_sts_mode = mta_info.get("mode") or ""
+                    mta_sts_max_age = mta_info.get("max_age")
+                    mta_sts_id = mta_info.get("id") or ""
+                except Exception:
+                    pass
 
-            try:
-                tlsrpt_rua = await fetch_tlsrpt_rua(registered, self.lookup) or ""
-            except Exception:
-                tlsrpt_rua = ""
+            tlsrpt_rua = exp_map.get("tlsrpt_rua") or ""
+            if not tlsrpt_rua:
+                try:
+                    tlsrpt_rua = await fetch_tlsrpt_rua(registered, self.lookup) or ""
+                except Exception:
+                    tlsrpt_rua = ""
 
             # Security.txt probe
             # None, not False: the probe is off in the bulk corpus run, and False
