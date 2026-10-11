@@ -12,6 +12,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 
 import cname_resolver
 import mail_resolver
+import dkim_resolver
 from celery_app import app
 from dns_module.dns_application import DNSApplication
 from loop_guard import run_coroutine
@@ -245,6 +246,10 @@ def resolve_cnames(file: str) -> dict[str, Any]:
         # dataset (mail_resolver.py). Chosen by file name so the dispatcher needs no second queue.
         if mail_resolver.is_mail_file(filename):
             return _resolve_mail(input_path, filename)
+        # dkim_<run>_<n>.txt / dkimfull_...: one DOMAIN per line, probed for well-known DKIM
+        # selectors (dkim_resolver.py), sent as dataset dkim_resolution.
+        if dkim_resolver.is_dkim_file(filename):
+            return _resolve_dkim(input_path, filename)
         hosts = cname_resolver.read_hosts(input_path)
         rows = run_coroutine(lambda: cname_resolver.resolve_hosts(hosts, qps=CNAME_QPS))
         table = cname_resolver.to_table(rows, source_file=filename)
@@ -277,6 +282,25 @@ def _resolve_mail(input_path: Path, filename: str) -> dict[str, Any]:
                "queries": sum(r["queries"] for r in rows),
                "worker": socket.gethostname(), "sent_to": sent_to}
     log.info("mail task done: %s", payload)
+    return payload
+
+
+def _resolve_dkim(input_path: Path, filename: str) -> dict[str, Any]:
+    """The dkim_ branch of task.resolve_cnames. Raises on failure; the caller moves the file to
+    cname_failed/, exactly as for a cname file."""
+    domains = cname_resolver.read_hosts(input_path)
+    rows = run_coroutine(lambda: dkim_resolver.resolve_domains(
+        domains, qps=CNAME_QPS, prune=dkim_resolver.prunes(filename)))
+    table = dkim_resolver.to_table(rows, source_file=filename)
+    sent_to = _send_cname_results(table, filename, dataset=dkim_resolver.DATASET)
+    shutil.move(str(input_path), str(CNAME_DONE_FOLDER / filename))
+    payload = {"status": "success", "file": filename, "domains": len(domains),
+               "pruned": sum(1 for r in rows if r["pruned"]),
+               "wildcard": sum(1 for r in rows if r["wildcard"]),
+               "with_hits": sum(1 for r in rows if r["hits"]),
+               "queries": sum(r["queries"] for r in rows),
+               "worker": socket.gethostname(), "sent_to": sent_to}
+    log.info("dkim task done: %s", payload)
     return payload
 
 
