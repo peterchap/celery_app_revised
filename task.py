@@ -11,6 +11,7 @@ from typing import Any
 from celery.exceptions import SoftTimeLimitExceeded
 
 import cname_resolver
+import mail_resolver
 from celery_app import app
 from dns_module.dns_application import DNSApplication
 from loop_guard import run_coroutine
@@ -209,7 +210,7 @@ for p in [CNAME_IN_PROGRESS_FOLDER, CNAME_DONE_FOLDER, CNAME_FAILED_FOLDER, CNAM
     p.mkdir(parents=True, exist_ok=True)
 
 
-def _send_cname_results(table, filename: str) -> str:
+def _send_cname_results(table, filename: str, dataset: str = cname_resolver.DATASET) -> str:
     """Flight to the master, else a local parquet the operator re-sends. Returns where it went."""
     import pyarrow.parquet as pq
 
@@ -219,7 +220,7 @@ def _send_cname_results(table, filename: str) -> str:
         try:
             client = flight.FlightClient(url)
             try:
-                writer, _ = client.do_put(flight.FlightDescriptor.for_path(cname_resolver.DATASET), table.schema)
+                writer, _ = client.do_put(flight.FlightDescriptor.for_path(dataset), table.schema)
                 writer.write_table(table)
                 writer.close()
             finally:
@@ -240,6 +241,10 @@ def resolve_cnames(file: str) -> dict[str, Any]:
     input_path = CNAME_IN_PROGRESS_FOLDER / filename
     log.info("Starting cname task for file=%s qps=%s", filename, CNAME_QPS)
     try:
+        # mail_<run>_<n>.txt: the same path, but MX + SPF as well as the A query, sent as its own
+        # dataset (mail_resolver.py). Chosen by file name so the dispatcher needs no second queue.
+        if mail_resolver.is_mail_file(filename):
+            return _resolve_mail(input_path, filename)
         hosts = cname_resolver.read_hosts(input_path)
         rows = run_coroutine(lambda: cname_resolver.resolve_hosts(hosts, qps=CNAME_QPS))
         table = cname_resolver.to_table(rows, source_file=filename)
@@ -256,6 +261,23 @@ def resolve_cnames(file: str) -> dict[str, Any]:
         if input_path.exists():
             shutil.move(str(input_path), str(CNAME_FAILED_FOLDER / filename))
         raise
+
+
+def _resolve_mail(input_path: Path, filename: str) -> dict[str, Any]:
+    """The mail_ branch of task.resolve_cnames. Raises on failure; the caller moves the file to
+    cname_failed/, exactly as for a cname file."""
+    hosts = cname_resolver.read_hosts(input_path)
+    rows = run_coroutine(lambda: mail_resolver.resolve_hosts(hosts, qps=CNAME_QPS))
+    table = mail_resolver.to_table(rows, source_file=filename)
+    sent_to = _send_cname_results(table, filename, dataset=mail_resolver.DATASET)
+    shutil.move(str(input_path), str(CNAME_DONE_FOLDER / filename))
+    payload = {"status": "success", "file": filename, "hosts": len(hosts),
+               "with_mx": sum(1 for r in rows if r["mx"]),
+               "with_spf": sum(1 for r in rows if r["spf"]),
+               "queries": sum(r["queries"] for r in rows),
+               "worker": socket.gethostname(), "sent_to": sent_to}
+    log.info("mail task done: %s", payload)
+    return payload
 
 
 @app.task(name="task.process_file_retry", acks_late=True, soft_time_limit=7200, time_limit=7500)
