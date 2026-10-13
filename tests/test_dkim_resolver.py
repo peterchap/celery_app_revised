@@ -1,6 +1,6 @@
 """dkim_resolver + the dkim_ branch of task.resolve_cnames.
 
-WHY THESE TESTS. Asking every selector is ~27 queries a domain, so the module leans on two guard
+WHY THESE TESTS. Asking every selector is ~17 queries a domain, so the module leans on two guard
 queries to avoid most of them — and each guard can turn into a silent wrong answer: a prune that
 fires on anything other than NXDOMAIN hides real selectors, and a missing wildcard check reports
 every platform at once for a zone that answers everything. The rest pins what a hit is, and that
