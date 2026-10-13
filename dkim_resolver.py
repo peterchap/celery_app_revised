@@ -56,20 +56,25 @@ SELECTORS = (
     "k1", "pic",                   # Mailgun (k1 is also Mailchimp's older selector)
     "k2", "k3",                    # Mailchimp
     "mte1", "mte2",                # Mailchimp Transactional (Mandrill)
-    "pm",                          # Postmark
     "resend",                      # Resend
     "rwmt1", "rwmt2",              # Mailtrap
-    "scph",                        # SparkPost
-    "zm",                          # Zoho ZeptoMail
     "api",                         # Elastic Email
-    "mail", "brevo",               # Brevo
+    "mail",                        # Brevo
     "litesrv", "ml",               # MailerLite
-    "kl", "klaviyo",               # Klaviyo
-    "acem1", "acem2",              # ActiveCampaign
-    "omnisend",                    # Omnisend
+    "kl",                          # Klaviyo
     "mailjet",                     # Mailjet
-    "gr", "getresponse",           # GetResponse
 )
+# REMOVED 2026-10-13, on the two full probes so far (279,552 clean domains on 10-11 and
+# 230,077 on 10-12; domains where the selector answered, wildcard and answer-everything zones
+# excluded):
+#     acem1, acem2 (ActiveCampaign)  0, 0        klaviyo (Klaviyo)        0, 0
+#     getresponse (GetResponse)      0, 0        omnisend (Omnisend)      0, 1
+#     scph (SparkPost)               1, 2        zm (Zoho ZeptoMail)      4, 2
+#     brevo (Brevo)                  8, 2        gr (GetResponse)         13, 7
+#     pm (Postmark)                  44, 48
+# Ten of 27 selectors, so ten of ~28 queries per domain, for at most 70 domains a day between
+# them: these platforms issue account-specific selectors or the name is simply not in use. The
+# run was ~9h of the six cname@ workers. Put one back only with a count that justifies its query.
 # Not a selector any platform issues; used only to detect a wildcard under _domainkey.
 WILDCARD_PROBE = "dz-wildcard-probe-7q3x"
 
