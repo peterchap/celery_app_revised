@@ -63,7 +63,14 @@ SELECTORS = (
     "litesrv", "ml",               # MailerLite
     "kl",                          # Klaviyo
     "mailjet",                     # Mailjet
+    "selector1", "selector2",      # Microsoft 365 (CNAMEs into <tenant>.onmicrosoft.com or *.dkim.mail.microsoft)
+    "google",                      # Google Workspace (key published directly as TXT; no CNAME)
 )
+# ADDED 2026-10-15: the mailbox providers, not ESPs. The question they answer is not "which
+# platform sends for this domain" but "did DKIM follow the mail": a domain whose MX is Microsoft
+# 365 or Google and that publishes neither key signs with an unaligned d= (onmicrosoft.com /
+# gappssmtp.com). Measured on 8,332 Strato-DNS domains that had moved MX to Google or M365: 2,546
+# had the provider's key. Google admins can choose another selector prefix; `google` is the default.
 # REMOVED 2026-10-13, on the two full probes so far (279,552 clean domains on 10-11 and
 # 230,077 on 10-12; domains where the selector answered, wildcard and answer-everything zones
 # excluded):

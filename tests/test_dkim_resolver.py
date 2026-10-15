@@ -1,6 +1,6 @@
 """dkim_resolver + the dkim_ branch of task.resolve_cnames.
 
-WHY THESE TESTS. Asking every selector is ~17 queries a domain, so the module leans on two guard
+WHY THESE TESTS. Asking every selector is ~20 queries a domain, so the module leans on two guard
 queries to avoid most of them — and each guard can turn into a silent wrong answer: a prune that
 fires on anything other than NXDOMAIN hides real selectors, and a missing wildcard check reports
 every platform at once for a zone that answers everything. The rest pins what a hit is, and that
@@ -127,6 +127,11 @@ def test_to_table_matches_the_schema():
 
 def test_selectors_are_unique_and_the_probe_is_not_one_of_them():
     assert len(set(D.SELECTORS)) == len(D.SELECTORS) and D.WILDCARD_PROBE not in D.SELECTORS
+
+
+def test_the_mailbox_provider_selectors_are_asked():
+    """centralake resolve_dkim.N_SELECTORS mirrors len(SELECTORS); change both together."""
+    assert {"selector1", "selector2", "google"} <= set(D.SELECTORS) and len(D.SELECTORS) == 20
 
 
 # ------------------------------------------------------------------ the path
