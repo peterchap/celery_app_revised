@@ -133,7 +133,17 @@ async def lookup(name: str, nameserver: str, timeout: float) -> dict:
 
 
 def _answered(res: dict) -> bool:
-    return res["rcode"] == "NOERROR" and bool(res["cnames"] or res["has_key"])
+    """A CNAME chain is a hit whatever the final rcode; a key with no chain needs NOERROR.
+
+    A delegation whose target has no key yet ends in NXDOMAIN, but the chain is still in the
+    answer section and the selector is still set up: Microsoft 365's standby selector2 CNAMEs to
+    selector2-<d>._domainkey.<tenant>.onmicrosoft.com, which does not exist until the key rotates.
+    Such a hit has has_key=False, which is how the consumer tells it from a delegation with a key.
+    A transient failure is never a hit, chain or not.
+    """
+    if res["rcode"] in TRANSIENT:
+        return False
+    return bool(res["cnames"]) or (res["rcode"] == "NOERROR" and res["has_key"])
 
 
 async def resolve_domains(domains: list[str], *, qps: float, prune: bool = True,
