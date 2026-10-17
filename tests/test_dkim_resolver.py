@@ -152,3 +152,15 @@ def test_the_dkim_branch_stays_on_the_cname_path():
     assert "move_to_retries" not in body
     task = src.split('name="task.resolve_cnames"')[1].split("except BaseException")[0]
     assert "return _resolve_dkim(input_path, filename)" in task
+
+
+def test_selectors_come_from_the_knowledge_snapshot_unchanged():
+    """The list moved to dnsproject knowledge/dkim_selectors.yaml (2026-10-17). The corpus probe
+    it yields must be the 20 selectors, in query order, that were hard-coded here before."""
+    import json
+    assert D.SELECTORS == (
+        "s1", "s2", "k1", "pic", "k2", "k3", "mte1", "mte2", "resend", "rwmt1", "rwmt2",
+        "api", "mail", "litesrv", "ml", "kl", "mailjet", "selector1", "selector2", "google")
+    assert D.WILDCARD_PROBE == "dz-wildcard-probe-7q3x"
+    snap = json.loads(D._KNOWLEDGE.read_text(encoding="utf-8"))
+    assert snap["_generated"]["source"] == "dnsproject/knowledge/dkim_selectors.yaml"
