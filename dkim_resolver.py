@@ -38,8 +38,10 @@ As in cname_resolver, every asyncio primitive is created inside the coroutine.
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pyarrow as pa
 
@@ -49,41 +51,21 @@ DATASET = "dkim_resolution"
 FILE_PREFIX = "dkim_"
 FULL_PREFIX = "dkimfull_"          # no RFC 8020 prune: every selector is asked
 
-# Fixed, platform-chosen selector names (PC's platform signature table, 2026-10-11). The order
-# is the order they are asked in. Adding one costs a query per un-pruned domain per run.
-SELECTORS = (
-    "s1", "s2",                    # SendGrid
-    "k1", "pic",                   # Mailgun (k1 is also Mailchimp's older selector)
-    "k2", "k3",                    # Mailchimp
-    "mte1", "mte2",                # Mailchimp Transactional (Mandrill)
-    "resend",                      # Resend
-    "rwmt1", "rwmt2",              # Mailtrap
-    "api",                         # Elastic Email
-    "mail",                        # Brevo
-    "litesrv", "ml",               # MailerLite
-    "kl",                          # Klaviyo
-    "mailjet",                     # Mailjet
-    "selector1", "selector2",      # Microsoft 365 (CNAMEs into <tenant>.onmicrosoft.com or *.dkim.mail.microsoft)
-    "google",                      # Google Workspace (key published directly as TXT; no CNAME)
-)
-# ADDED 2026-10-15: the mailbox providers, not ESPs. The question they answer is not "which
-# platform sends for this domain" but "did DKIM follow the mail": a domain whose MX is Microsoft
-# 365 or Google and that publishes neither key signs with an unaligned d= (onmicrosoft.com /
-# gappssmtp.com). Measured on 8,332 Strato-DNS domains that had moved MX to Google or M365: 2,546
-# had the provider's key. Google admins can choose another selector prefix; `google` is the default.
-# REMOVED 2026-10-13, on the two full probes so far (279,552 clean domains on 10-11 and
-# 230,077 on 10-12; domains where the selector answered, wildcard and answer-everything zones
-# excluded):
-#     acem1, acem2 (ActiveCampaign)  0, 0        klaviyo (Klaviyo)        0, 0
-#     getresponse (GetResponse)      0, 0        omnisend (Omnisend)      0, 1
-#     scph (SparkPost)               1, 2        zm (Zoho ZeptoMail)      4, 2
-#     brevo (Brevo)                  8, 2        gr (GetResponse)         13, 7
-#     pm (Postmark)                  44, 48
-# Ten of 27 selectors, so ten of ~28 queries per domain, for at most 70 domains a day between
-# them: these platforms issue account-specific selectors or the name is simply not in use. The
-# run was ~9h of the six cname@ workers. Put one back only with a count that justifies its query.
-# Not a selector any platform issues; used only to detect a wildcard under _domainkey.
-WILDCARD_PROBE = "dz-wildcard-probe-7q3x"
+# The selector list is authored ONCE, in dnsproject knowledge/dkim_selectors.yaml, and arrives
+# here as a generated snapshot (knowledge/dkim_selectors.json; regenerate with dnsproject
+# scripts/export_knowledge.py). SELECTORS is its `corpus_probe` subset, in the file's order,
+# which is the order they are asked in. Adding one costs a query per un-pruned domain per run:
+# the YAML carries why each is in, and the measured hits of the ten retired on 2026-10-13.
+_KNOWLEDGE = Path(__file__).resolve().parent / "knowledge" / "dkim_selectors.json"
+
+
+def _load_selectors(path: Path = _KNOWLEDGE) -> tuple[tuple[str, ...], str]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    return (tuple(s["name"] for s in doc["selectors"] if s["corpus_probe"]),
+            doc["wildcard_probe"])
+
+
+SELECTORS, WILDCARD_PROBE = _load_selectors()
 
 HIT = pa.struct([("selector", pa.string()), ("cnames", pa.list_(pa.string())), ("has_key", pa.bool_())])
 SCHEMA = pa.schema([
