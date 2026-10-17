@@ -108,6 +108,38 @@ def test_hits_keep_selector_chain_and_key_and_skip_empty_answers():
     assert (row["selectors_asked"], row["selectors_failed"], row["queries"]) == (3, 0, 5)
 
 
+def test_a_delegation_whose_target_does_not_exist_yet_is_a_hit():
+    """M365's standby selector2: the CNAME is published, the tenant-side name is NXDOMAIN until
+    the key rotates. The resolver returns the chain WITH rcode NXDOMAIN; it is still a hit."""
+    standby = "selector2-acme-com._domainkey.acme.onmicrosoft.com"
+    r = D.parse_selector(_msg("selector2._domainkey.acme.com.",
+                              f"selector2._domainkey.acme.com. 3600 IN CNAME {standby}.\n", rcode="NXDOMAIN"))
+    assert r == {"rcode": "NXDOMAIN", "cnames": [standby], "has_key": False}
+    (row,) = _run(["acme.com"], {"_domainkey.acme.com": EMPTY, "s1._domainkey.acme.com": r})
+    assert row["hits"] == [{"selector": "s1", "cnames": [standby], "has_key": False}]
+    assert row["selectors_failed"] == 0
+
+
+def test_a_bare_nxdomain_or_a_failed_lookup_with_a_chain_is_not_a_hit(monkeypatch):
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(D.asyncio, "sleep", no_sleep)
+    (row,) = _run(["acme.com"], {
+        "_domainkey.acme.com": EMPTY,
+        "k2._domainkey.acme.com": MISS,
+        "s1._domainkey.acme.com": {"rcode": "SERVFAIL", "cnames": ["s1.domainkey.u1.wl.sendgrid.net"],
+                                   "has_key": False}}, retries=0)
+    assert row["hits"] == [] and row["selectors_failed"] == 1
+
+
+def test_a_wildcard_cname_to_a_missing_target_still_marks_the_zone():
+    """`*._domainkey` CNAMEd to a name that does not exist answers NXDOMAIN with a chain for
+    every selector, the impossible one included: wildcard, as before."""
+    wild = {"rcode": "NXDOMAIN", "cnames": ["nothing.example.net"], "has_key": False}
+    (row,) = _run(["acme.com"], {"_domainkey.acme.com": EMPTY}, default=wild)
+    assert row["wildcard"] is True and row["hits"] == [] and row["selectors_asked"] == 0
+
+
 def test_a_failed_selector_lookup_is_counted_not_read_as_absent(monkeypatch):
     async def no_sleep(_):
         return None
