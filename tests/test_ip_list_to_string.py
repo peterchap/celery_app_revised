@@ -21,5 +21,17 @@ def test_non_addresses_are_kept_as_given():
     assert ip_list_to_string([]) == ""
 
 
-def test_the_hostname_joiner_still_mangles_ipv6_which_is_why_it_must_not_be_used():
-    assert list_to_string(["2602:ff16:9:0:1:17b:0:1"]) == "2602ff1690117b01"
+def test_the_hostname_joiner_no_longer_mangles_ipv6_but_is_still_the_wrong_tool():
+    """This assertion was inverted when to_ascii_hostname() gained its IP guard.
+
+    It used to pin the mangling -- list_to_string(["2602:ff16:9:0:1:17b:0:1"]) ==
+    "2602ff1690117b01" -- as the reason addresses must not go through it. The guard
+    removes that failure mode at its source, so the joiner now returns the address
+    intact and the old assertion would fail.
+
+    The rule it was defending is unchanged: ip_list_to_string() is what the IP columns
+    call. It says so at the call site and it canonicalizes, where this one happens not
+    to corrupt. Belt and braces, deliberately.
+    """
+    assert list_to_string(["2602:ff16:9:0:1:17b:0:1"]) == "2602:ff16:9:0:1:17b:0:1"
+    assert ip_list_to_string(["2602:ff16:9:0:1:17b:0:1"]) == "2602:ff16:9:0:1:17b:0:1"
