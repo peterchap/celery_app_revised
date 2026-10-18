@@ -39,9 +39,27 @@ _EXTRACTOR = tldextract.TLDExtract(
 # --------------------------------------------------------------------
 # Basic utilities and normalization
 # --------------------------------------------------------------------
+def normalize_ip(value: Optional[str]) -> str:
+    """
+    Canonical text form of an IPv4/IPv6 literal, or "" if the value is not an IP.
+    IPv6 is compressed and lowercased (RFC 5952), matching entity_hasher.hash_ip()'s
+    normalization so a text column and the hashed id agree on a form.
+    """
+    if not value:
+        return ""
+    v = str(value).strip()
+    if len(v) >= 2 and v[0] == "[" and v[-1] == "]":
+        v = v[1:-1]
+    try:
+        return ipaddress.ip_address(v).compressed
+    except ValueError:
+        return ""
+
+
 def to_ascii_hostname(name: Optional[str]) -> str:
     """
     Lowercase + IDNA (punycode) each label + strip trailing dot.
+    IP literals are returned in canonical form rather than IDNA-encoded.
     Returns "" if input is falsy.
     """
     if not name:
@@ -49,6 +67,14 @@ def to_ascii_hostname(name: Optional[str]) -> str:
     name = str(name).strip().strip(".")
     if not name:
         return ""
+    # An IPv6 literal is one label full of colons, which IDNA rejects outright, and the
+    # LDH fallback below would then strip the colons and silently turn
+    # 2602:ff16:9:0:1:17b:0:1 into the unparseable 2602ff1690117b01. ip_list_to_string()
+    # keeps the a/aaaa columns away from this function; this guard is what stops the
+    # next caller that does not know to.
+    ip_literal = normalize_ip(name)
+    if ip_literal:
+        return ip_literal
     labels: List[str] = []
     for lbl in name.split("."):
         if not lbl:
