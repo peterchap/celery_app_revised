@@ -123,6 +123,30 @@ def list_to_string(lst: List[str]) -> str:
     return ",".join(normalize_name(s).replace(",", ":") for s in lst)
 
 
+def ip_list_to_string(lst: List[str]) -> str:
+    """
+    Join a list of IP addresses as a single CSV string, each address kept intact.
+
+    Addresses must NOT go through list_to_string: that normalises each item as a hostname,
+    and an IPv6 address fails IDNA, so the LDH fallback strips its colons
+    (2602:ff16:9:0:1:17b:0:1 became 2602ff1690117b01 in every report). Valid addresses are
+    written in canonical form (RFC 5952 for IPv6); anything else is kept as given, stripped.
+    """
+    if not lst:
+        return ""
+    out: List[str] = []
+    for s in lst:
+        v = str(s).strip()
+        if not v:
+            continue
+        try:
+            v = ipaddress.ip_address(v).compressed
+        except ValueError:
+            pass
+        out.append(v)
+    return ",".join(out)
+
+
 def mx_to_string(mx_records: List[tuple]) -> str:
     """
     Convert [(priority, host), ...] into "prio:host,prio:host".

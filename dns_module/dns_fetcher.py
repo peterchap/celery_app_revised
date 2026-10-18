@@ -15,7 +15,7 @@ from .policy import detect_mta_sts, fetch_tlsrpt_rua, fetch_mta_sts_policy_http
 from .dns_utils import (
     to_ascii_hostname, reg_domain, ip_to_int,
     parse_smtp_banner, infer_mbp_from_banner,
-    list_to_string, records_to_string
+    list_to_string, records_to_string, ip_list_to_string
 )
 
 load_dotenv()
@@ -1666,8 +1666,8 @@ class DNSFetcher:
             a_ttl = expanded.get("ttl", 0) or 0
             ns1_list = ns_list if isinstance(ns_list, list) else ([ns_list] if ns_list else [])
             ns1_str = list_to_string(ns1_list) if ns1_list else ""
-            a_str = list_to_string(a_list) if a_list else ""
-            aaaa_str = list_to_string(aaaa_list) if aaaa_list else ""
+            a_str = ip_list_to_string(a_list) if a_list else ""
+            aaaa_str = ip_list_to_string(aaaa_list) if aaaa_list else ""
 
             # CAA / NAPTR / SRV (flatten and normalize)
             try:
@@ -2128,8 +2128,8 @@ class DNSFetcher:
         ns1_list = ns1_val if isinstance(ns1_val, list) else ([ns1_val] if ns1_val else [])
         ns1_list_str = [str(x) for x in ns1_list] if ns1_list else []
         ns1_str = list_to_string(ns1_list_str) if ns1_list_str else ""
-        a_str = list_to_string(a_list) if a_list else ""
-        aaaa_str = list_to_string(aaaa_list) if aaaa_list else ""
+        a_str = ip_list_to_string(a_list) if a_list else ""
+        aaaa_str = ip_list_to_string(aaaa_list) if aaaa_list else ""
 
         # SOA structured fields for legacy path
         soa_struct_list: List[Dict[str, Any]] = []
