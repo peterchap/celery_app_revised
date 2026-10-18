@@ -15,7 +15,7 @@ from .policy import detect_mta_sts, fetch_tlsrpt_rua, fetch_mta_sts_policy_http
 from .dns_utils import (
     to_ascii_hostname, reg_domain, ip_to_int,
     parse_smtp_banner, infer_mbp_from_banner,
-    list_to_string
+    list_to_string, records_to_string
 )
 
 load_dotenv()
@@ -1879,9 +1879,9 @@ class DNSFetcher:
                 dnssec=bool(exp_map.get("dnskey") or False),
                 soa_serial=exp_map.get("soa_serial") or 0,
                 # New record fields
-                caa=list_to_string(caa_list) if caa_list else "",
-                naptr=list_to_string(naptr_list) if naptr_list else "",
-                srv=list_to_string(srv_list) if srv_list else "",
+                caa=records_to_string(caa_list) if caa_list else "",
+                naptr=records_to_string(naptr_list) if naptr_list else "",
+                srv=records_to_string(srv_list) if srv_list else "",
                 caa_records=caa_struct,
                 naptr_records=naptr_struct,
                 srv_records=srv_struct,

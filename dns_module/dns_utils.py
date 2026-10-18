@@ -109,9 +109,14 @@ def normalize_mx_host(host: Optional[str]) -> str:
 
 def list_to_string(lst: List[str]) -> str:
     """
-    Join a list of hostnames as a CSV-safe single string:
+    Join a list of *hostnames* as a CSV-safe single string:
     - normalize each
     - replace commas inside items to avoid collisions
+
+    Hostnames only. Every item goes through to_ascii_hostname(), which splits on ".",
+    IDNA-encodes each label, and on failure keeps only [A-Za-z0-9-] -- so anything that
+    is not a hostname is silently rewritten rather than rejected. Record presentation
+    text goes through records_to_string() and IP literals through ips_to_string().
     """
     if not lst:
         return ""
@@ -125,6 +130,31 @@ def mx_to_string(mx_records: List[tuple]) -> str:
     if not mx_records:
         return ""
     return ",".join(f"{int(priority)}:{normalize_mx_host(host)}" for priority, host in mx_records)
+
+
+def records_to_string(values: List[str]) -> str:
+    r"""
+    Join record *values* -- CAA, NAPTR and SRV presentation text -- into one column.
+
+    Separator is "|", matching batch_processor._join_list(): the bulk path and this one
+    write the same bronze columns and must not disagree about their format.
+
+    Not list_to_string(). That runs every item through to_ascii_hostname(), the hostname
+    normalizer, which splits on ".", IDNA-encodes each label, and on InvalidCodepoint
+    falls back to re.sub(r"[^A-Za-z0-9\-]", "", lbl). A record value is not a hostname,
+    so that erased every space, quote, "@", ":", "+", "!" and "$" and then re-split what
+    was left on dots: '0 issue "letsencrypt.org"' came out as '0issueletsencrypt.org',
+    and the SRV triple in '10 5 5269 xmpp.example.com.' fused into '1055269', which no
+    reader can split back into priority, weight and port.
+
+    Items are kept verbatim beyond stripping surrounding whitespace and dropping empties.
+    A "|" inside a value -- conceivable in a NAPTR regexp, nowhere else -- would be
+    ambiguous here; the caa_records / naptr_records / srv_records struct columns carry the
+    parsed fields losslessly and are the form to read when the individual fields matter.
+    """
+    if not values:
+        return ""
+    return "|".join(s for s in (str(v).strip() for v in values if v is not None) if s)
 
 
 def ip_to_int(ip: str) -> int:
