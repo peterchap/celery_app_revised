@@ -151,6 +151,101 @@ def test_a_failed_selector_lookup_is_counted_not_read_as_absent(monkeypatch):
     assert row["selectors_failed"] == 1 and calls.count("s1._domainkey.acme.com") == 2
 
 
+# ------------------------------------------------------------------ never an absence
+@pytest.mark.parametrize("answers,default,kw,expected", [
+    ({"_domainkey.acme.com": EMPTY, "k2._domainkey.acme.com": KEY}, MISS, {}, "visible"),
+    ({"_domainkey.acme.com": EMPTY}, MISS, {}, "not_visible"),
+    ({"_domainkey.acme.com": MISS}, MISS, {}, "not_visible_pruned"),
+    ({"_domainkey.acme.com": EMPTY}, {"rcode": "NOERROR", "cnames": ["x.example.net"], "has_key": False},
+     {}, "unknown_wildcard"),
+    ({"_domainkey.acme.com": EMPTY, "s1._domainkey.acme.com": {"rcode": "TIMEOUT", "cnames": [], "has_key": False}},
+     MISS, {"retries": 0}, "unknown_failed"),
+])
+def test_every_row_says_what_was_visible_and_none_says_absent(answers, default, kw, expected):
+    (row,) = _run(["acme.com"], answers, default=default, **kw)
+    assert row["dkim_visibility"] == expected
+
+
+def test_no_visibility_value_reads_as_an_absence():
+    """PC's rule: selectors cannot be enumerated, so the vocabulary has no "missing"/"none"."""
+    src = (REPO / "dkim_resolver.py").read_text(encoding="utf-8")
+    body = src.split("def visibility(")[1].split("\nasync def ")[0]
+    values = {line.split('"')[1] for line in body.splitlines() if line.strip().startswith("return \"")}
+    assert values == {"visible", "not_visible", "not_visible_pruned", "unknown_wildcard", "unknown_failed"}
+    assert not any(w in v for v in values for w in ("missing", "absent", "none", "no_dkim", "no_key"))
+
+
+def test_selectors_probed_names_exactly_what_was_asked():
+    """A trimmed list must not read as "asked and silent" for the names no longer asked."""
+    (row,) = _run(["acme.com"], {"_domainkey.acme.com": EMPTY}, selectors=("k2", "s1"))
+    assert row["selectors_probed"] == ["k2", "s1"] and row["selectors_asked"] == 2
+    (row,) = _run(["acme.com"], {"_domainkey.acme.com": MISS})
+    assert row["selectors_probed"] == []
+
+
+# ------------------------------------------------------------------ previously seen selectors
+def test_a_carried_selector_is_asked_even_when_trimmed_from_the_list():
+    calls = []
+    (row,) = _run(["acme.com"], {"_domainkey.acme.com": EMPTY, "mesmtp._domainkey.acme.com": KEY}, calls,
+                  carried={"acme.com": ("mesmtp",)})
+    assert row["selectors_probed"] == ["mesmtp", "k2", "s1", "pm"]
+    assert [h["selector"] for h in row["hits"]] == ["mesmtp"] and row["stale"] == []
+
+
+def test_a_carried_selector_that_misses_is_stale_not_dropped():
+    (row,) = _run(["acme.com"], {"_domainkey.acme.com": EMPTY}, carried={"acme.com": ("k2", "mesmtp")})
+    assert row["carried"] == ["k2", "mesmtp"] and row["stale"] == ["k2", "mesmtp"]
+    assert row["dkim_visibility"] == "not_visible"
+    # a carried selector is asked once, not again from the common list
+    assert row["selectors_probed"] == ["k2", "mesmtp", "s1", "pm"]
+
+
+def test_a_carried_selector_whose_lookup_failed_is_neither_hit_nor_stale(monkeypatch):
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(D.asyncio, "sleep", no_sleep)
+    (row,) = _run(["acme.com"], {"_domainkey.acme.com": EMPTY,
+                                 "k2._domainkey.acme.com": {"rcode": "SERVFAIL", "cnames": [], "has_key": False}},
+                  carried={"acme.com": ("k2",)}, retries=0)
+    assert row["stale"] == [] and row["selectors_failed"] == 1 and row["dkim_visibility"] == "unknown_failed"
+
+
+def test_the_prune_does_not_skip_carried_selectors_and_a_hit_disproves_it():
+    """8.7% of pruned rows sampled 2026-10-16 had a key under an NXDOMAIN _domainkey."""
+    calls = []
+    (row,) = _run(["acme.com"], {"_domainkey.acme.com": MISS, "selector1._domainkey.acme.com": KEY}, calls,
+                  carried={"acme.com": ("selector1",)})
+    assert row["pruned"] is False and row["domainkey_rcode"] == "NXDOMAIN"
+    assert row["selectors_probed"] == ["selector1", "k2", "s1", "pm"]       # the full list after all
+    assert row["dkim_visibility"] == "visible"
+
+
+def test_a_pruned_domain_asks_only_its_carried_selectors_when_they_miss():
+    calls = []
+    (row,) = _run(["acme.com"], {"_domainkey.acme.com": MISS}, calls, carried={"acme.com": ("selector1",)})
+    assert calls == ["_domainkey.acme.com", f"{D.WILDCARD_PROBE}._domainkey.acme.com",
+                     "selector1._domainkey.acme.com"]
+    assert row["pruned"] is True and row["stale"] == ["selector1"]
+    assert row["dkim_visibility"] == "not_visible_pruned"
+
+
+def test_a_pruned_domain_with_nothing_carried_costs_one_query_as_before():
+    calls = []
+    rows = _run(["acme.com", "beta.com"], {"_domainkey.acme.com": MISS, "_domainkey.beta.com": MISS}, calls,
+                carried={"beta.com": ()})
+    assert [r["queries"] for r in rows] == [1, 1]
+    assert sorted(calls) == ["_domainkey.acme.com", "_domainkey.beta.com"]
+
+
+def test_read_domains_accepts_bare_and_carrying_lines(tmp_path):
+    p = tmp_path / "dkim_r1_00001.txt"
+    p.write_text("# header\nAcme.com.\nbeta.com k2,Selector1\n\nbeta.com s1 k2\n"
+                 f"gamma.com bad/name {D.WILDCARD_PROBE} ok_1\n", encoding="utf-8")
+    domains, carried = D.read_domains(p)
+    assert domains == ["acme.com", "beta.com", "gamma.com"]
+    assert carried == {"beta.com": ("k2", "selector1", "s1"), "gamma.com": ("ok_1",)}
+
+
 def test_to_table_matches_the_schema():
     rows = _run(["acme.com"], {"_domainkey.acme.com": EMPTY, "k2._domainkey.acme.com": KEY})
     t = D.to_table(rows, source_file="dkim_r1_00001.txt", worker="contabo54")

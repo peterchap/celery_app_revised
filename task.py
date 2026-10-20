@@ -288,9 +288,9 @@ def _resolve_mail(input_path: Path, filename: str) -> dict[str, Any]:
 def _resolve_dkim(input_path: Path, filename: str) -> dict[str, Any]:
     """The dkim_ branch of task.resolve_cnames. Raises on failure; the caller moves the file to
     cname_failed/, exactly as for a cname file."""
-    domains = cname_resolver.read_hosts(input_path)
+    domains, carried = dkim_resolver.read_domains(input_path)
     rows = run_coroutine(lambda: dkim_resolver.resolve_domains(
-        domains, qps=CNAME_QPS, prune=dkim_resolver.prunes(filename)))
+        domains, qps=CNAME_QPS, prune=dkim_resolver.prunes(filename), carried=carried))
     table = dkim_resolver.to_table(rows, source_file=filename)
     sent_to = _send_cname_results(table, filename, dataset=dkim_resolver.DATASET)
     shutil.move(str(input_path), str(CNAME_DONE_FOLDER / filename))
@@ -298,6 +298,8 @@ def _resolve_dkim(input_path: Path, filename: str) -> dict[str, Any]:
                "pruned": sum(1 for r in rows if r["pruned"]),
                "wildcard": sum(1 for r in rows if r["wildcard"]),
                "with_hits": sum(1 for r in rows if r["hits"]),
+               "not_visible": sum(1 for r in rows if r["dkim_visibility"].startswith("not_visible")),
+               "stale": sum(1 for r in rows if r["stale"]),
                "queries": sum(r["queries"] for r in rows),
                "worker": socket.gethostname(), "sent_to": sent_to}
     log.info("dkim task done: %s", payload)
