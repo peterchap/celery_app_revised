@@ -24,13 +24,33 @@ This repo is **two things**, and the distinction matters:
 
 ## Installing it in another application
 
+Most consumers only resolve names, and that needs none of the parquet tooling:
+
 ```bash
-pip install "git+ssh://git@github.com/peterchap/celery_app_revised.git@dns-module-v1.6.1"
+pip install "git+ssh://git@github.com/peterchap/celery_app_revised.git@dns-module-v1.7.0"
+```
+
+That gives you `DNSFetcher` and the `dns_lookup` helpers. If you run the bulk pipeline —
+`DNSApplication`, or `fetch_batch` over parquet — take the `batch` extra instead, which
+adds pyarrow, polars and xxhash:
+
+```bash
+pip install "datazag-dns-module[batch] @ git+ssh://git@github.com/peterchap/celery_app_revised.git@dns-module-v1.7.0"
 ```
 
 Pin the tag, not a branch. `pip install -e .` from a checkout also works for local
 development. `dns_module.__version__` reports the installed version and is what the
 observatory drift guard reads.
+
+The split exists because a single-domain lookup should not cost ~200 MB of columnar
+tooling: `pyarrow` is imported by `arrow_schemas`, `batch_processor`, `change_tracker`,
+`dns_application`, `infra_risk_enricher`, `ip_batch_processor` and `mx_host_batch`,
+`polars` by `infra_risk_enricher`, and `xxhash` by `entity_hasher` — none of which the
+`DNSFetcher` path touches. `lmdb`, `loguru` and `aiohttp` stay core, because
+`dns_lookup`, `logger` and `policy` import them at module scope. **Before 1.7.0 all ten
+were hard dependencies**, so a consumer upgrading from 1.6.x that does batch work must
+add `[batch]` or it will lose pyarrow/polars/xxhash. The worker fleet is unaffected: it
+clones master and imports by path rather than installing the package.
 
 ⚠️ **The ansible `celery_slave` role clones this repo at `version: master`, not at the
 tag** — so master is what ships to the worker fleet. When releasing, bump the version in

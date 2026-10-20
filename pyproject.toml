@@ -4,20 +4,37 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datazag-dns-module"
-version = "1.6.1"
+version = "1.7.0"
 description = "Datazag shared DNS collection engine (dns_module + kv) — canonical home, consumed by the celery worker fleet and all pipeline servers"
 requires-python = ">=3.10"
+
+# Core: exactly what it takes to import dns_module and resolve names, i.e.
+# DNSFetcher and the dns_lookup helpers. lmdb is core because dns_lookup imports
+# it at module scope (and `dns_module/__init__` imports dns_lookup), loguru
+# because of logger.py, aiohttp because policy.py fetches the MTA-STS policy.
 dependencies = [
     "dnspython",
-    "pyarrow",
     "python-dotenv",
     "lmdb",
     "loguru",
     "aiohttp",
     "idna",
     "tldextract",
-    "xxhash",
+]
+
+[project.optional-dependencies]
+# The parquet/batch machinery, needed only by the bulk pipeline modules:
+# pyarrow by arrow_schemas, batch_processor, change_tracker, dns_application,
+# infra_risk_enricher, ip_batch_processor and mx_host_batch; polars by
+# infra_risk_enricher; xxhash by entity_hasher. Nothing on the single-domain
+# path touches them — verified by running DNSFetcher to a real answer with these
+# three absent. Install `datazag-dns-module[batch]` for anything that runs
+# DNSApplication or fetch_batch over parquet; a lookup-only consumer should not
+# have to take ~200 MB of columnar tooling to resolve one name.
+batch = [
+    "pyarrow",
     "polars",
+    "xxhash",
 ]
 
 [tool.setuptools]
