@@ -24,6 +24,27 @@ consumer's mapping. Two things it cannot see, by construction:
     then the only clue, and several names are shared between vendors (`k1`, `mail`, `api`).
 So "no hit" is never "does not use a sending platform".
 
+NEVER AN ABSENCE. Selectors cannot be enumerated from DNS, so no row can say a domain has no DKIM;
+it can only say which of the names we asked answered. `dkim_visibility` spells that out, and none
+of its values is an absence:
+  visible             at least one selector answered (zone not a wildcard);
+  not_visible         selectors were asked and none answered — the key, if any, is under a name
+                      we did not ask;
+  not_visible_pruned  `_domainkey` was NXDOMAIN so the common list was not asked (guard 1 below,
+                      which some servers get wrong);
+  unknown_wildcard    the zone answers every selector, so nothing can be read from it;
+  unknown_failed      no answer, and at least one lookup ended TIMEOUT / SERVFAIL / ERROR.
+`selectors_probed` lists exactly which names were asked, so a consumer can tell "not asked this
+time" (the list was trimmed, or the guard fired) from "asked and silent".
+
+PREVIOUSLY SEEN SELECTORS. A row is one probe, not the domain's state, and a probe that misses a
+selector seen before does not mean it is gone (a trimmed list, a guard that fired, a flaky
+server). A line may carry the selectors earlier probes saw: `acme.com k2,selector1`. Those are
+`carried`: always asked, first, even when guard 1 fires — and a carried selector that answers
+under an NXDOMAIN `_domainkey` disproves the guard, so the full list is asked after all. A
+carried selector asked and silent is listed in `stale`, never dropped: the consumer keeps its
+last-seen time from the earlier row. Bare-domain lines work as before (nothing carried).
+
 QUERY BUDGET — the reason for the two guard queries. Asking every selector costs len(SELECTORS)
 queries per domain. Two cheap questions avoid most of that:
   1. `_domainkey.<domain>`. NXDOMAIN there means nothing exists beneath it (RFC 8020), so no
@@ -71,7 +92,8 @@ HIT = pa.struct([("selector", pa.string()), ("cnames", pa.list_(pa.string())), (
 SCHEMA = pa.schema([
     ("domain", pa.string()),
     ("domainkey_rcode", pa.string()),   # of `_domainkey.<domain>`; NOT_ASKED in dkimfull_ mode
-    ("pruned", pa.bool_()),             # _domainkey was NXDOMAIN, so no selector was asked
+    ("pruned", pa.bool_()),             # _domainkey was NXDOMAIN, so the common list was not asked
+                                        # (carried selectors still were; see selectors_probed)
     ("wildcard", pa.bool_()),           # the impossible selector answered; hits would be meaningless
     ("selectors_asked", pa.int16()),
     ("selectors_failed", pa.int16()),   # selectors whose lookup ended TIMEOUT / SERVFAIL / ERROR
@@ -80,7 +102,15 @@ SCHEMA = pa.schema([
     ("queries", pa.int16()),
     ("worker", pa.string()),
     ("source_file", pa.string()),
+    # Added 2026-10-20; older rows read them as null. None of these says "no DKIM".
+    ("dkim_visibility", pa.string()),   # visible | not_visible | not_visible_pruned | unknown_wildcard | unknown_failed
+    ("selectors_probed", pa.list_(pa.string())),  # the names asked this probe, in order
+    ("carried", pa.list_(pa.string())),  # previously seen selectors the input line supplied
+    ("stale", pa.list_(pa.string())),    # carried, asked, and silent this probe: NOT gone
 ])
+
+MAX_CARRIED = 16                    # a carried list is a handful of names; more is a bad input line
+_SELECTOR_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789-_.")
 
 
 def is_dkim_file(filename: str) -> bool:
@@ -89,6 +119,44 @@ def is_dkim_file(filename: str) -> bool:
 
 def prunes(filename: str) -> bool:
     return not filename.startswith(FULL_PREFIX)
+
+
+def read_domains(path) -> tuple[list[str], dict[str, tuple[str, ...]]]:
+    """Domains in file order, and the previously seen selectors any line carried.
+
+    A line is `domain` or `domain sel1,sel2` (commas and/or whitespace). Blanks, comments and
+    duplicate domains are dropped as in cname_resolver.read_hosts; a duplicate's selectors are
+    merged. A selector that is not a plain DNS label sequence, or the wildcard probe, is ignored.
+    """
+    domains, carried = [], {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.strip().lower().replace(",", " ").split()
+            if not parts or parts[0].startswith("#"):
+                continue
+            d = parts[0].rstrip(".")
+            if not d:
+                continue
+            if d not in carried:
+                domains.append(d)
+                carried[d] = ()
+            sels = [s.strip(".") for s in parts[1:]]
+            sels = [s for s in sels if s and set(s) <= _SELECTOR_CHARS and s != WILDCARD_PROBE]
+            carried[d] = tuple(dict.fromkeys(carried[d] + tuple(sels)))[:MAX_CARRIED]
+    return domains, {d: s for d, s in carried.items() if s}
+
+
+def visibility(row: dict) -> str:
+    """The row's `dkim_visibility`. See the module docstring: there is no absence value."""
+    if row["wildcard"]:
+        return "unknown_wildcard"
+    if row["hits"]:
+        return "visible"
+    if row["selectors_failed"]:
+        return "unknown_failed"
+    if row["pruned"]:
+        return "not_visible_pruned"
+    return "not_visible"
 
 
 def parse_selector(response) -> dict:
@@ -148,8 +216,13 @@ def _answered(res: dict) -> bool:
 
 async def resolve_domains(domains: list[str], *, qps: float, prune: bool = True,
                           nameserver: str = "127.0.0.1", timeout: float = 4.0, retries: int = 1,
-                          parallel: int = 64, selectors: tuple = SELECTORS, lookup=lookup) -> list[dict]:
-    """Probe every domain at `qps` (one limiter across all queries). `lookup` is injectable."""
+                          parallel: int = 64, selectors: tuple = SELECTORS, lookup=lookup,
+                          carried: dict[str, tuple[str, ...]] | None = None) -> list[dict]:
+    """Probe every domain at `qps` (one limiter across all queries). `lookup` is injectable.
+
+    `carried` maps a domain to the selectors earlier probes saw (read_domains); they are asked
+    first and are never pruned away."""
+    carried = carried or {}
     limiter = RateLimiter(qps)
     sem = asyncio.Semaphore(parallel)
 
@@ -165,8 +238,25 @@ async def resolve_domains(domains: list[str], *, qps: float, prune: bool = True,
         return res, sent
 
     async def one(domain: str) -> dict:
+        prior = tuple(carried.get(domain, ()))
         row = {"domain": domain, "domainkey_rcode": "NOT_ASKED", "pruned": False, "wildcard": False,
-               "selectors_asked": 0, "selectors_failed": 0, "hits": [], "queries": 0}
+               "selectors_asked": 0, "selectors_failed": 0, "hits": [], "queries": 0,
+               "selectors_probed": [], "carried": list(prior), "stale": []}
+
+        async def probe_all(names) -> None:
+            for sel in names:
+                res, n = await ask(f"{sel}._domainkey.{domain}")
+                row["queries"] += n
+                row["selectors_asked"] += 1
+                row["selectors_probed"].append(sel)
+                if res["rcode"] in TRANSIENT:
+                    row["selectors_failed"] += 1
+                elif _answered(res):
+                    row["hits"].append({"selector": sel, "cnames": res["cnames"],
+                                        "has_key": res["has_key"]})
+                elif sel in prior:
+                    row["stale"].append(sel)
+
         async with sem:
             if prune:
                 base, n = await ask(f"_domainkey.{domain}")
@@ -174,21 +264,21 @@ async def resolve_domains(domains: list[str], *, qps: float, prune: bool = True,
                 row["domainkey_rcode"] = base["rcode"]
                 if base["rcode"] == "NXDOMAIN":
                     row["pruned"] = True
-            if not row["pruned"]:
+            # A pruned domain with nothing carried is done. One with carried selectors still
+            # asks them: the guard is wrong on some servers, and a seen selector outranks it.
+            if not row["pruned"] or prior:
                 probe, n = await ask(f"{WILDCARD_PROBE}._domainkey.{domain}")
                 row["queries"] += n
                 if _answered(probe):
                     row["wildcard"] = True
+                    row["pruned"] = False       # something answered under _domainkey after all
                 else:
-                    for sel in selectors:
-                        res, n = await ask(f"{sel}._domainkey.{domain}")
-                        row["queries"] += n
-                        row["selectors_asked"] += 1
-                        if res["rcode"] in TRANSIENT:
-                            row["selectors_failed"] += 1
-                        elif _answered(res):
-                            row["hits"].append({"selector": sel, "cnames": res["cnames"],
-                                                "has_key": res["has_key"]})
+                    await probe_all(prior)
+                    if row["pruned"] and row["hits"]:
+                        row["pruned"] = False   # guard disproven: ask the common list too
+                    if not row["pruned"]:
+                        await probe_all(s for s in selectors if s not in prior)
+        row["dkim_visibility"] = visibility(row)
         row["resolved_at"] = datetime.now(timezone.utc).replace(microsecond=0)
         return row
 
