@@ -52,11 +52,29 @@ were hard dependencies**, so a consumer upgrading from 1.6.x that does batch wor
 add `[batch]` or it will lose pyarrow/polars/xxhash. The worker fleet is unaffected: it
 clones master and imports by path rather than installing the package.
 
+## Releasing
+
 ⚠️ **The ansible `celery_slave` role clones this repo at `version: master`, not at the
-tag** — so master is what ships to the worker fleet. When releasing, bump the version in
-both `pyproject.toml` and `dns_module/__init__.py`, merge to master, **and** push a
-matching `dns-module-vX.Y.Z` tag. If the tag lags master, the fleet and pip consumers run
-different code — the exact divergence this package exists to prevent.
+tag** — so master is what ships to the worker fleet. If the tag lags master, the fleet and
+pip consumers run different code: the exact divergence this package exists to prevent.
+
+Every release, all four:
+
+1. Bump the version in **`pyproject.toml`** and **`dns_module/__init__.py`** (keep
+   `__init__.py`'s CRLF line endings — it has been churned back and forth before).
+2. Merge to master.
+3. Push a matching **`dns-module-vX.Y.Z`** tag, so tag == master.
+4. Bump **`_DNS_MODULE_CANONICAL_FALLBACK`** in riskscore's
+   `orchestration/observatory_detect.py`, and `RECONCILED_TO` in
+   `tests/test_dns_module_drift_guard.py` with it.
+
+Step 4 is the one that gets forgotten — it was missed for every release from 1.3.0 through
+1.6.1, which left the observatory's version-drift rule comparing every host against 1.2.0
+and therefore unable to fire at all, silently, for six releases. It is a separate repo, so
+nothing here will fail if you skip it; the only symptom is a guard that stops guarding.
+Bump it even for a packaging-only release: that rule tracks the canonical tag, not "the
+oldest lineage whose records are trustworthy" (the correctness floor is a different
+constant, `_DNS_MODULE_MIN` in `datazag_intelligence/canonical_collect.py`).
 
 ## Configuration — read this before your first lookup
 
