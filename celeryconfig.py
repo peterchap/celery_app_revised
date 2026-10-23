@@ -33,7 +33,20 @@ broker_connection_timeout = 30  # don't wait too long on a lost broker
 # routinely run 25min+ and can approach the time limits, so the default
 # caused duplicate processing. Must exceed the worst-case task duration.
 # Keep in sync with the master's celeryconfig.py.
-broker_transport_options = {"visibility_timeout": 43200}  # 12 hours
+#
+# queue_order_strategy="priority": a worker takes its next task from the FIRST non-empty queue in
+# its -Q list (CELERY_QUEUES on the nodes: priority_queue,new_domain_queue,retry_queue,
+# standard_queue). Kombu's Redis default is "round_robin", which rotates between the queues and
+# takes no notice of their order. With the refresh plan's ~12-minute std_plan batches in
+# standard_queue, round robin let each worker take one seconds-long prio_burst per plan batch:
+# on 2026-10-23 at 09:00, 1,331 prio_burst and 883 certstream new_domains were waiting while all
+# 20 workers ran plan batches, and only 60 bursts finished in an hour. Strict order costs
+# standard_queue nothing in practice: the queues ahead of it hold seconds-long work, not a
+# steady flood.
+broker_transport_options = {
+    "visibility_timeout": 43200,          # 12 hours
+    "queue_order_strategy": "priority",
+}
 
 # Serialisation
 # ============================================================
